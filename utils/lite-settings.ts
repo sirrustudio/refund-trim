@@ -1,0 +1,145 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { loadJson } from '@/utils/loadJson';
+import { LITE_SITES } from '@/utils/lite-sites';
+
+const KEY = 'liteSettings';
+
+/** Reels allowed in the DMs per visit. 0 = no limit. */
+export const DM_REEL_CHOICES = [1, 2, 3, 5, 0] as const;
+
+/** Minutes to browse before a gentle stop. 0 = off. */
+export const REMINDER_CHOICES = [0, 5, 10, 15, 30] as const;
+
+/**
+ * The choices that belong to one app. (Grayscale used to live here too; it
+ * was taken out in Oct 2026, and an old saved `grayscale` is just ignored.)
+ */
+export type LiteSiteLook = {
+  /** Gentle stop after this many minutes (one of REMINDER_CHOICES). */
+  reminderMins: number;
+};
+
+export const DEFAULT_SITE_LOOK: LiteSiteLook = {
+  reminderMins: 0,
+};
+
+export type LiteSettings = {
+  /** Reels that may play in the DMs per visit; 0 = no limit. */
+  dmReelLimit: number;
+  /**
+   * The user's choice per switch, by id. A switch with no entry here has never
+   * been touched and uses its own default (see lite-sites.ts).
+   */
+  blocks: Record<string, boolean>;
+  /**
+   * Gentle stop, per app id. An app with no entry has never been touched and
+   * uses DEFAULT_SITE_LOOK (read it with getSiteLook).
+   */
+  sites: Record<string, LiteSiteLook>;
+};
+
+export const DEFAULT_LITE_SETTINGS: LiteSettings = {
+  dmReelLimit: 2,
+  blocks: {},
+  sites: {},
+};
+
+// Last settings seen in this run of the app. The browser reads it instantly on
+// open, so the page can start loading without waiting for storage.
+let cachedSettings: LiteSettings | null = null;
+
+/** The settings if they were already loaded or saved this run, else null. */
+export function peekLiteSettings(): LiteSettings | null {
+  return cachedSettings;
+}
+
+const ALL_BLOCKS = LITE_SITES.flatMap((site) => site.optionalBlocks ?? []);
+
+async function readLiteSettings(): Promise<LiteSettings> {
+  const stored = await loadJson<unknown>(KEY, DEFAULT_LITE_SETTINGS);
+  if (typeof stored !== 'object' || stored === null) {
+    return DEFAULT_LITE_SETTINGS;
+  }
+  const data = stored as Record<string, unknown>;
+
+  // Stored data is checked, not trusted: only real booleans count, and only
+  // ids we know about are kept.
+  const blocks: Record<string, boolean> = {};
+  const savedBlocks =
+    typeof data.blocks === 'object' && data.blocks !== null
+      ? (data.blocks as Record<string, unknown>)
+      : {};
+  for (const block of ALL_BLOCKS) {
+    if (typeof savedBlocks[block.id] === 'boolean') {
+      blocks[block.id] = savedBlocks[block.id] as boolean;
+    }
+  }
+
+  // Older versions kept ONE gentle stop for every app. If this phone still
+  // has that, each app starts from that same choice, so nobody loses a
+  // setting. The next save writes the new shape.
+  const legacyLook = readSiteLook(data);
+  const savedSites =
+    typeof data.sites === 'object' && data.sites !== null
+      ? (data.sites as Record<string, unknown>)
+      : null;
+  const sites: Record<string, LiteSiteLook> = {};
+  for (const site of LITE_SITES) {
+    const saved = savedSites?.[site.id];
+    if (typeof saved === 'object' && saved !== null) {
+      sites[site.id] = readSiteLook(saved as Record<string, unknown>);
+    } else if (!savedSites) {
+      sites[site.id] = legacyLook;
+    }
+  }
+
+  return {
+    dmReelLimit: (DM_REEL_CHOICES as readonly number[]).includes(
+      data.dmReelLimit as number,
+    )
+      ? (data.dmReelLimit as number)
+      : DEFAULT_LITE_SETTINGS.dmReelLimit,
+    blocks,
+    sites,
+  };
+}
+
+/** Checks one stored look: only a known minute count passes. */
+function readSiteLook(data: Record<string, unknown>): LiteSiteLook {
+  return {
+    reminderMins: (REMINDER_CHOICES as readonly number[]).includes(
+      data.reminderMins as number,
+    )
+      ? (data.reminderMins as number)
+      : 0,
+  };
+}
+
+/** One app's look and limits, falling back to the defaults. */
+export function getSiteLook(
+  settings: LiteSettings,
+  siteId: string,
+): LiteSiteLook {
+  return settings.sites[siteId] ?? DEFAULT_SITE_LOOK;
+}
+
+export async function getLiteSettings(): Promise<LiteSettings> {
+  cachedSettings = await readLiteSettings();
+  return cachedSettings;
+}
+
+export async function saveLiteSettings(settings: LiteSettings): Promise<void> {
+  cachedSettings = settings;
+  try {
+    await AsyncStorage.setItem(KEY, JSON.stringify(settings));
+  } catch {
+    // A failed save just means the switch is back next time.
+  }
+}
+
+/** Ids of every switch that is on, counting defaults for untouched ones. */
+export function enabledBlockIds(settings: LiteSettings): string[] {
+  return ALL_BLOCKS.filter(
+    (block) => settings.blocks[block.id] ?? block.defaultOn,
+  ).map((block) => block.id);
+}
