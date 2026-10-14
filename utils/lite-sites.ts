@@ -117,12 +117,6 @@ export type LiteSite = {
   safeHomeLabel: string;
   /** What the blocked card says. */
   blockedLine: string;
-  /**
-   * The site's own page colour (it follows the phone's light/dark). The strips
-   * above and below the page (clock, home bar) are painted with it, so the
-   * site looks like it fills the screen.
-   */
-  pageColor?: { light: string; dark: string };
   /** false = not offered yet (waiting for a real-phone check). */
   shown: boolean;
 };
@@ -189,8 +183,6 @@ export const LITE_SITES: LiteSite[] = [
     mainBlockId: 'instagram-reels',
     safeHomeLabel: 'Back to messages',
     blockedLine: 'That part is switched off here.',
-    // Instagram's plain white / black page, not a Refund colour.
-    pageColor: { light: '#FFFFFF', dark: '#000000' },
     shown: true,
   },
 ];

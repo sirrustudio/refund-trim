@@ -1,4 +1,5 @@
 import { router, Stack, useLocalSearchParams } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Linking,
@@ -7,11 +8,13 @@ import {
   TurboModuleRegistry,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import type { WebView, WebViewMessageEvent } from "react-native-webview";
 import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
 import { LiteBlockedCard } from "@/components/sirru/lite/lite-blocked-card";
-import { LiteLoginNote } from "@/components/sirru/lite/lite-login-note";
 import { LiteMenu } from "@/components/sirru/lite/lite-menu";
 import { LiteSettingsSheet } from "@/components/sirru/lite/lite-settings-sheet";
 import { LiteStatusPanel } from "@/components/sirru/lite/lite-status-panel";
@@ -32,6 +35,7 @@ import {
   buildLiteInjection,
   parseLiteMessage,
   PAUSE_ALL_VIDEOS,
+  type LiteRgb,
 } from "@/utils/lite-inject";
 import {
   enabledBlockIds,
@@ -69,6 +73,19 @@ function loadWebView(): typeof WebView | null {
 }
 const NativeWebView = loadWebView();
 
+/** Until the page reports its own: Instagram's white, or its dark (Oct 14). */
+const LIGHT_PAGE: LiteRgb = { r: 255, g: 255, b: 255 };
+const DARK_PAGE: LiteRgb = { r: 12, g: 16, b: 20 };
+
+function toCss({ r, g, b }: LiteRgb): string {
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** Dark enough to need a white clock on it (perceived brightness). */
+function isDarkRgb({ r, g, b }: LiteRgb): boolean {
+  return 0.299 * r + 0.587 * g + 0.114 * b < 140;
+}
+
 /**
  * The lite browser: a site's own web page with Reels, Shorts and the like
  * switched off. On this phone only, Refund looks at the ADDRESS to decide
@@ -78,6 +95,7 @@ const NativeWebView = loadWebView();
 export default function LiteBrowserScreen() {
   const fontsLoaded = useSirruFonts();
   const isDark = useIsDark();
+  const insets = useSafeAreaInsets();
   const { site: siteParam } = useLocalSearchParams<{ site?: string }>();
   // The param came from a link, so check it against the known list.
   const baseSite = findLiteSite(siteParam);
@@ -123,7 +141,14 @@ export default function LiteBrowserScreen() {
   const [blocked, setBlocked] = useState<BlockedState | null>(null);
   // True while the page loading is a login page: no script is handed over.
   const [scriptOff, setScriptOff] = useState(false);
-  // First-time help: the login note, and the first login it waits for.
+  // The colours at the page's top and bottom edges, reported by the page
+  // script, for the strips behind the clock and the home bar.
+  const [edgeColors, setEdgeColors] = useState<{
+    top: LiteRgb;
+    bottom: LiteRgb;
+  } | null>(null);
+  // First-time help: remembers the first login, which retires the
+  // "password goes to Instagram" line on the Reel-free page.
   const { intro, markDone } = useLiteIntro();
   // One save per visit is enough; every later page would just repeat it.
   const signedInSavedRef = useRef(false);
@@ -134,7 +159,10 @@ export default function LiteBrowserScreen() {
   const reminderMins = siteLook?.reminderMins ?? 0;
   useEffect(() => {
     if (!reminderMins) return;
-    const timer = setTimeout(() => setReminderShown(true), reminderMins * 60_000);
+    const timer = setTimeout(
+      () => setReminderShown(true),
+      reminderMins * 60_000,
+    );
     return () => clearTimeout(timer);
   }, [reminderMins, reminderRound]);
 
@@ -173,7 +201,10 @@ export default function LiteBrowserScreen() {
       // Only real web links go to Safari; other schemes (like the real
       // Instagram app's own) are not opened.
       const parsed = parseLiteUrl(request.url);
-      if (parsed && (parsed.protocol === "https" || parsed.protocol === "http")) {
+      if (
+        parsed &&
+        (parsed.protocol === "https" || parsed.protocol === "http")
+      ) {
         void Linking.openURL(request.url).catch(() => {});
       }
     }
@@ -186,6 +217,10 @@ export default function LiteBrowserScreen() {
     if (!message) return;
     if (message.type === "nav") {
       handleAddress(message.url);
+      return;
+    }
+    if (message.type === "colors") {
+      setEdgeColors({ top: message.top, bottom: message.bottom });
       return;
     }
     // Reel limit hit inside the DMs (counted in the page).
@@ -213,7 +248,9 @@ export default function LiteBrowserScreen() {
     const target = blocked?.backToChat
       ? "window.location.href"
       : JSON.stringify(site.startUrl);
-    webRef.current?.injectJavaScript(`window.location.replace(${target}); true;`);
+    webRef.current?.injectJavaScript(
+      `window.location.replace(${target}); true;`,
+    );
   }
 
   // Home leaves the browser for the Reel-free page that opened it. If there
@@ -232,7 +269,8 @@ export default function LiteBrowserScreen() {
   function applySettingsAndClose() {
     setSettingsOpen(false);
     // Only reload if a switch really changed.
-    if (JSON.stringify(liteSettings.settings) === JSON.stringify(applied)) return;
+    if (JSON.stringify(liteSettings.settings) === JSON.stringify(applied))
+      return;
     setApplied(liteSettings.settings);
     setBlocked(null);
     blockedShownRef.current = false;
@@ -270,168 +308,203 @@ export default function LiteBrowserScreen() {
   // `site` is null until the saved switches have loaded (a moment).
   if (!fontsLoaded || !baseSite || !site || !applied) return null;
 
-  // The strips above and below the page (clock, home bar) take the site's own
-  // colour once it's showing, so it looks like it fills the screen. Cream
-  // while loading, to match the loading cover.
-  const pageColor = site.pageColor
-    ? isDark
-      ? site.pageColor.dark
-      : site.pageColor.light
-    : null;
-  const stripColor = pageColor && !loading && !failed ? pageColor : T.cream;
-
-  // The first time a login page shows (and never once signed in): what you
-  // type there goes to the site. Hidden behind any of Refund's own cards.
-  const showLoginNote =
-    !!intro &&
-    !intro.loginNoteDone &&
-    !intro.signedInOnce &&
-    scriptOff &&
-    !loading &&
-    !failed &&
-    !blocked &&
-    !reminderShown;
+  // Refund's own cream cover is up (loading, no connection, blocked, gentle
+  // stop): it fills the whole screen, clock and home bar included.
+  const coverShown =
+    !NativeWebView || loading || failed || !!blocked || reminderShown;
+  // Where the page goes. Instagram leaves no room for the clock or the home
+  // bar (Safari never puts a page there), so its top bar sat under the clock
+  // (seen Oct 14). So the page sits between them, and the two strips are
+  // painted the colour the page has at that edge, which makes it look full
+  // screen. Login pages are the exception: the script is off there, so their
+  // colour is unknown (a guess left black bands around a white login page in
+  // dark mode), and their form starts low enough to go edge to edge.
+  const edgeToEdge = scriptOff;
+  const fallback = isDark ? DARK_PAGE : LIGHT_PAGE;
+  const topColor = edgeColors?.top ?? fallback;
+  const bottomColor = edgeColors?.bottom ?? fallback;
+  const pageFrame = edgeToEdge
+    ? StyleSheet.absoluteFill
+    : {
+        ...StyleSheet.absoluteFillObject,
+        top: insets.top,
+        bottom: insets.bottom,
+      };
+  // The clock's colour follows what is behind it: the top strip, or on a login
+  // page the page itself, which follows Refund's light/dark.
+  const statusStyle = coverShown
+    ? "auto"
+    : (edgeToEdge ? isDark : isDarkRgb(topColor))
+      ? "light"
+      : "dark";
 
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
-      <SafeAreaView
-        edges={["top", "left", "right", "bottom"]}
-        style={[styles.body, { backgroundColor: stripColor }]}
-      >
-        <View
-          style={styles.webWrap}
-          onLayout={(event) => setWebSize(event.nativeEvent.layout)}
-        >
-          {!NativeWebView ? (
-            <LiteStatusPanel
-              label="UPDATE NEEDED"
-              line={`This version of Refund can't open ${site.label} here yet. Update the app and try again.`}
+      <StatusBar style={statusStyle} />
+      <View style={styles.body}>
+        {NativeWebView && !edgeToEdge ? (
+          <>
+            <View
+              style={[
+                styles.strip,
+                {
+                  top: 0,
+                  height: insets.top,
+                  backgroundColor: toCss(topColor),
+                },
+              ]}
             />
-          ) : null}
-          {NativeWebView ? (
-            <NativeWebView
-              key={attempt}
-              ref={webRef}
-              // "*" hands EVERY address to our filter. With the default list
-              // (http/https only) the library opens anything else itself, so
-              // an "instagram://" link from the page launched the real
-              // (shielded) Instagram app and a pause screen appeared.
-              originWhitelist={["*"]}
-              source={{ uri: site.startUrl }}
-              // Runs before the page's own code so no address change is missed.
-              injectedJavaScriptBeforeContentLoaded={injection}
-              onShouldStartLoadWithRequest={onShouldStartLoad}
-              onMessage={onMessage}
-              onNavigationStateChange={(nav) => {
-                setCanGoBack(nav.canGoBack);
-                setCanGoForward(nav.canGoForward);
-                currentUrlRef.current = nav.url;
-                // A page that only opens when signed in: the first login has
-                // happened, so the login help (here and on the page) retires.
-                if (
-                  !signedInSavedRef.current &&
-                  !nav.loading &&
-                  isSignedInUrl(site, nav.url)
-                ) {
-                  signedInSavedRef.current = true;
-                  if (!intro?.signedInOnce) markDone("signedInOnce");
-                }
-                // Off a login page without a new page load (or the swap lost
-                // the race): put the script in now. It skips itself if it's
-                // already on the page.
-                if (
-                  scriptOff &&
-                  !nav.loading &&
-                  fullInjection &&
-                  !isNoScriptUrl(site, nav.url)
-                ) {
-                  setScriptOff(false);
-                  webRef.current?.injectJavaScript(fullInjection);
-                }
-              }}
-              // Lift the cover once the page is mostly there instead of waiting
-              // for every last image; it is cream, so nothing flashes white.
-              onLoadProgress={(event) => {
-                if (event.nativeEvent.progress >= 0.75) setLoading(false);
-              }}
-              onLoadEnd={() => setLoading(false)}
-              onError={() => setFailed(true)}
-              // Videos (a clip a friend sent) play in the page
-              // instead of jumping to full screen.
-              allowsInlineMediaPlayback
-              // Dev builds only: the Mac's Safari (Develop menu) can look inside
-              // the page, e.g. to check Lite's script is off on the login form.
-              // Always off in App Store and TestFlight builds.
-              webviewDebuggingEnabled={__DEV__}
-              // No long-press link preview: it loads the page in the
-              // background (extra work) and would preview a blocked Reels link.
-              allowsLinkPreview={false}
-              // Swipe from the left edge goes back INSIDE the page. On the first
-              // page it is switched off, so the same swipe belongs to the
-              // screen instead and leaves Lite (there is no top bar any more).
-              allowsBackForwardNavigationGestures={canGoBack}
-              // Cookies stay on this phone, like Safari. Refund never reads them.
-              style={styles.web}
+            <View
+              style={[
+                styles.strip,
+                {
+                  bottom: 0,
+                  height: insets.bottom,
+                  backgroundColor: toCss(bottomColor),
+                },
+              ]}
             />
-          ) : null}
-
-          {NativeWebView && loading && !failed ? (
-            <LiteStatusPanel label={`OPENING ${site.label.toUpperCase()}`} />
-          ) : null}
-          {failed ? (
-            <LiteStatusPanel
-              label="NO CONNECTION"
-              line={`Couldn't reach ${site.label}.`}
-              buttonLabel="Try again"
-              onPress={retry}
-            />
-          ) : null}
-          {blocked ? (
-            <LiteBlockedCard
-              line={blocked.line}
-              buttonLabel={blocked.buttonLabel}
-              onBack={goSafeHome}
-            />
-          ) : null}
-
-          {reminderShown ? (
-            <LiteStatusPanel
-              label={`${reminderMins} MINUTES IN`}
-              line="A gentle stop. Use the menu's home button when you're done."
-              buttonLabel="Keep going"
-              onPress={() => {
-                setReminderShown(false);
-                setReminderRound((round) => round + 1);
-              }}
-            />
-          ) : null}
-
-          {showLoginNote ? (
-            <LiteLoginNote
-              siteLabel={site.label}
-              host={site.allowedHosts[0]}
-              onCheck={() => router.push("/lite/check")}
-              onDismiss={() => markDone("loginNoteDone")}
-            />
-          ) : null}
-
-          {/* The only chrome left: a small draggable button that opens a
-              toolbar. Drawn last so it sits on top of everything. */}
-          <LiteMenu
-            bounds={webSize}
-            siteLabel={site.label}
-            canGoBack={canGoBack}
-            canGoForward={canGoForward}
-            onBack={() => webRef.current?.goBack()}
-            onForward={() => webRef.current?.goForward()}
-            onHome={leaveToPage}
-            onReload={() => webRef.current?.reload()}
-            onShare={shareLink}
-            onSettings={() => setSettingsOpen(true)}
+          </>
+        ) : null}
+        {NativeWebView ? (
+          <NativeWebView
+            key={attempt}
+            ref={webRef}
+            // "*" hands EVERY address to our filter. With the default list
+            // (http/https only) the library opens anything else itself, so
+            // an "instagram://" link from the page launched the real
+            // (shielded) Instagram app and a pause screen appeared.
+            originWhitelist={["*"]}
+            source={{ uri: site.startUrl }}
+            // Runs before the page's own code so no address change is missed.
+            injectedJavaScriptBeforeContentLoaded={injection}
+            onShouldStartLoadWithRequest={onShouldStartLoad}
+            onMessage={onMessage}
+            onNavigationStateChange={(nav) => {
+              setCanGoBack(nav.canGoBack);
+              setCanGoForward(nav.canGoForward);
+              currentUrlRef.current = nav.url;
+              // A page that only opens when signed in: the first login has
+              // happened, so the login help (here and on the page) retires.
+              if (
+                !signedInSavedRef.current &&
+                !nav.loading &&
+                isSignedInUrl(site, nav.url)
+              ) {
+                signedInSavedRef.current = true;
+                if (!intro?.signedInOnce) markDone("signedInOnce");
+              }
+              // Off a login page without a new page load (or the swap lost
+              // the race): put the script in now. It skips itself if it's
+              // already on the page.
+              if (
+                scriptOff &&
+                !nav.loading &&
+                fullInjection &&
+                !isNoScriptUrl(site, nav.url)
+              ) {
+                setScriptOff(false);
+                webRef.current?.injectJavaScript(fullInjection);
+              }
+            }}
+            // Lift the cover once the page is mostly there instead of waiting
+            // for every last image; it is cream, so nothing flashes white.
+            onLoadProgress={(event) => {
+              if (event.nativeEvent.progress >= 0.75) setLoading(false);
+            }}
+            onLoadEnd={() => setLoading(false)}
+            onError={() => setFailed(true)}
+            // Videos (a clip a friend sent) play in the page
+            // instead of jumping to full screen.
+            allowsInlineMediaPlayback
+            // Dev builds only: the Mac's Safari (Develop menu) can look inside
+            // the page, e.g. to check Lite's script is off on the login form.
+            // Always off in App Store and TestFlight builds.
+            webviewDebuggingEnabled={__DEV__}
+            // No long-press link preview: it loads the page in the
+            // background (extra work) and would preview a blocked Reels link.
+            allowsLinkPreview={false}
+            // Swipe from the left edge goes back INSIDE the page. On the first
+            // page it is switched off, so the same swipe belongs to the
+            // screen instead and leaves Lite (there is no top bar any more).
+            allowsBackForwardNavigationGestures={canGoBack}
+            // Cookies stay on this phone, like Safari. Refund never reads them.
+            // The room for the clock and home bar is made above (pageFrame),
+            // so iOS mustn't add it again.
+            contentInsetAdjustmentBehavior="never"
+            style={pageFrame}
           />
-        </View>
-      </SafeAreaView>
+        ) : null}
+
+        {/* Refund's own layer: covers and the ⋯ button stay clear of the
+            clock and home bar. Touches pass through to the page except on
+            what's drawn here. */}
+        <SafeAreaView
+          edges={["top", "left", "right", "bottom"]}
+          pointerEvents="box-none"
+          style={[StyleSheet.absoluteFill, coverShown && styles.cover]}
+        >
+          <View
+            style={styles.layer}
+            pointerEvents="box-none"
+            onLayout={(event) => setWebSize(event.nativeEvent.layout)}
+          >
+            {!NativeWebView ? (
+              <LiteStatusPanel
+                label="UPDATE NEEDED"
+                line={`This version of Refund can't open ${site.label} here yet. Update the app and try again.`}
+              />
+            ) : null}
+
+            {NativeWebView && loading && !failed ? (
+              <LiteStatusPanel label={`OPENING ${site.label.toUpperCase()}`} />
+            ) : null}
+            {failed ? (
+              <LiteStatusPanel
+                label="NO CONNECTION"
+                line={`Couldn't reach ${site.label}.`}
+                buttonLabel="Try again"
+                onPress={retry}
+              />
+            ) : null}
+            {blocked ? (
+              <LiteBlockedCard
+                line={blocked.line}
+                buttonLabel={blocked.buttonLabel}
+                onBack={goSafeHome}
+              />
+            ) : null}
+
+            {reminderShown ? (
+              <LiteStatusPanel
+                label={`${reminderMins} MINUTES IN`}
+                line="A gentle stop. Use the menu's home button when you're done."
+                buttonLabel="Keep going"
+                onPress={() => {
+                  setReminderShown(false);
+                  setReminderRound((round) => round + 1);
+                }}
+              />
+            ) : null}
+
+            {/* The only chrome left: a small draggable button that opens a
+              toolbar. Drawn last so it sits on top of everything. */}
+            <LiteMenu
+              bounds={webSize}
+              siteLabel={site.label}
+              canGoBack={canGoBack}
+              canGoForward={canGoForward}
+              onBack={() => webRef.current?.goBack()}
+              onForward={() => webRef.current?.goForward()}
+              onHome={leaveToPage}
+              onReload={() => webRef.current?.reload()}
+              onShare={shareLink}
+              onSettings={() => setSettingsOpen(true)}
+            />
+          </View>
+        </SafeAreaView>
+      </View>
 
       <LiteSettingsSheet
         visible={settingsOpen}
@@ -444,8 +517,11 @@ export default function LiteBrowserScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Cream under the page, so a page still loading never flashes white.
   body: { flex: 1, backgroundColor: T.cream },
-  webWrap: { flex: 1 },
-  // Same colour as the panels, so a page still loading never flashes white.
-  web: { flex: 1, backgroundColor: T.cream },
+  layer: { flex: 1 },
+  // Behind the clock and the home bar, painted the page's edge colour.
+  strip: { position: "absolute", left: 0, right: 0 },
+  // Behind a cover, the clock and home-bar strips are cream too.
+  cover: { backgroundColor: T.cream },
 });

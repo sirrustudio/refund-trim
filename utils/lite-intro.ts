@@ -10,15 +10,12 @@ const KEY = 'liteIntro';
 export type LiteIntro = {
   /** Today's "one swipe left" card: dismissed, or the page was opened. */
   todayCardDone: boolean;
-  /** The note on Instagram's login page: dismissed with "Got it". */
-  loginNoteDone: boolean;
   /** A signed-in page has loaded once, so the login help is no longer needed. */
   signedInOnce: boolean;
 };
 
 export const EMPTY_LITE_INTRO: LiteIntro = {
   todayCardDone: false,
-  loginNoteDone: false,
   signedInOnce: false,
 };
 
@@ -29,7 +26,6 @@ export async function loadLiteIntro(): Promise<LiteIntro> {
   const data = stored as Record<string, unknown>;
   return {
     todayCardDone: data.todayCardDone === true,
-    loginNoteDone: data.loginNoteDone === true,
     signedInOnce: data.signedInOnce === true,
   };
 }

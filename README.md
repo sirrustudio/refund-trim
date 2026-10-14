@@ -14,19 +14,20 @@ Refund itself is closed source. The pieces around these files (buttons, fonts, t
 
 ## What runs on Instagram's page
 
-One script: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 240 lines. Refund hands it to the page as the page starts loading. It does five things:
+One script: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 310 lines. Refund hands it to the page as the page starts loading. It does six things:
 
 1. **Hides buttons** that lead to the parts you've switched off (Reels is on by default, Explore is optional), plus Instagram's "Open app" button, with a style rule. The list is in [`utils/lite-sites.ts`](utils/lite-sites.ts).
 2. **Reports address changes to Refund.** Instagram often changes its address without loading a new page, so the script tells Refund each new address. Refund then decides whether to show the page or a "switched off here" card.
 3. **Pauses videos** that start playing behind that card.
 4. **Counts reels played in messages**, for the "Reels allowed in DMs" limit. When you pass the limit it sends Refund a short message saying so. To tell reels apart it remembers each video's source address in the page's memory only. That is never sent.
-5. **Switches itself off** on any page that has a password box, within a second or the moment you tap the box.
+5. **Reports the page's edge colours.** Instagram leaves no room for the iPhone's clock or home bar, so Refund keeps the page between them and paints those two strips to match the page. The script sends the background colour at the page's top and bottom edge, only when it changes. Refund accepts nothing but `rgb()` numbers.
+6. **Switches itself off** on any page that has a password box, within a second or the moment you tap the box.
 
 ## What it never does
 
-- It makes no network requests of its own. The only things it sends are two kinds of message to the Refund app on the same phone: the page's address, and "reel limit reached". Search the file for `postMessage`: there are two.
+- It makes no network requests of its own. The only things it sends are three kinds of message to the Refund app on the same phone: the page's address, "reel limit reached", and the two edge colours. Search the file for `postMessage`: there are three.
 - It doesn't read what you type. It checks only whether a password box exists, never what is in it.
-- It doesn't read your messages, posts, cookies or stored data. The only things it reads from the page are its address, whether it has a password box, and the size, position and source address of videos.
+- It doesn't read your messages, posts, cookies or stored data. The only things it reads from the page are its address, whether it has a password box, the background colour at its top and bottom edge, and the size, position and source address of videos.
 
 This search should print nothing:
 

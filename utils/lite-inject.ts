@@ -7,7 +7,13 @@
 // sees full loads, so this script reports every address change back to us.
 import type { LiteSite } from '@/utils/lite-sites';
 
-export type LiteMessage = { type: 'nav'; url: string } | { type: 'reelLimit' };
+/** A colour as three 0-255 numbers. */
+export type LiteRgb = { r: number; g: number; b: number };
+
+export type LiteMessage =
+  | { type: 'nav'; url: string }
+  | { type: 'reelLimit' }
+  | { type: 'colors'; top: LiteRgb; bottom: LiteRgb };
 
 /**
  * Pauses every video on the page. Run when the blocked card goes up: the card
@@ -27,11 +33,37 @@ true;
 /** Longest address we accept from the page, so a strange page can't flood us. */
 const MAX_URL_LENGTH = 2048;
 
+/**
+ * Reads a CSS colour the page sent ("rgb(0, 0, 0)" or "rgba(…)"). Only those
+ * two shapes with numbers 0-255 pass, so the page can't hand us anything else
+ * to paint with; the alpha is dropped (the script only sends solid colours).
+ */
+export function parseLiteColor(value: unknown): LiteRgb | null {
+  if (typeof value !== 'string' || value.length > 40) return null;
+  const match = /^rgba?\((\d{1,3}), ?(\d{1,3}), ?(\d{1,3})(, ?[\d.]+)?\)$/.exec(
+    value,
+  );
+  if (!match) return null;
+  const [r, g, b] = [match[1], match[2], match[3]].map(Number);
+  if (r > 255 || g > 255 || b > 255) return null;
+  return { r, g, b };
+}
+
 /** Reads a message from the page. Anything unexpected returns null. */
 export function parseLiteMessage(raw: string): LiteMessage | null {
   try {
-    const data = JSON.parse(raw) as { type?: unknown; url?: unknown };
+    const data = JSON.parse(raw) as {
+      type?: unknown;
+      url?: unknown;
+      top?: unknown;
+      bottom?: unknown;
+    };
     if (data.type === 'reelLimit') return { type: 'reelLimit' };
+    if (data.type === 'colors') {
+      const top = parseLiteColor(data.top);
+      const bottom = parseLiteColor(data.bottom);
+      return top && bottom ? { type: 'colors', top, bottom } : null;
+    }
     if (
       data.type === 'nav' &&
       typeof data.url === 'string' &&
@@ -47,7 +79,8 @@ export function parseLiteMessage(raw: string): LiteMessage | null {
 
 /**
  * Builds the injected script for one site. Only the address (`location.href`)
- * is sent back — never page content, never anything typed.
+ * and the colours at the page's top and bottom edges are sent back — never
+ * page content, never anything typed.
  */
 export function buildLiteInjection(
   site: LiteSite,
@@ -57,7 +90,10 @@ export function buildLiteInjection(
     ? `${site.hideSelectors.join(',')}{display:none !important;}`
     : '';
   // A whole number 0-99 only, since it is written into the script text.
-  const reelLimit = Math.max(0, Math.min(99, Math.floor(options.reelLimit) || 0));
+  const reelLimit = Math.max(
+    0,
+    Math.min(99, Math.floor(options.reelLimit) || 0),
+  );
   // JSON.stringify makes the CSS a safe JS string literal.
   const css = JSON.stringify(hideRule);
   // The login pages, written into the script: it runs inside the page and
@@ -108,6 +144,41 @@ export function buildLiteInjection(
   });
   window.addEventListener('popstate', send);
   window.addEventListener('hashchange', send);
+
+  // Edge colours. Refund keeps the page clear of the clock and the home bar
+  // (Instagram's top bar would sit under the clock: Safari never puts a page
+  // there, so the site leaves no room for it) and paints those two strips to
+  // match. This reads the background colour of whatever is at the page's top
+  // and bottom edge: the first solid one, walking up from the element there.
+  function edgeColor(y) {
+    var node = document.elementFromPoint(window.innerWidth / 2, y);
+    while (node && node.nodeType === 1) {
+      var color = getComputedStyle(node).backgroundColor;
+      // "transparent" and see-through colours (alpha 0) are skipped.
+      if (color && color !== 'transparent' && !/^rgba\\(.*, 0\\)$/.test(color)) {
+        return color;
+      }
+      node = node.parentElement;
+    }
+    // Nothing solid there: send nothing and keep the colour we have.
+    return null;
+  }
+  var lastColors = '';
+  function sendColors() {
+    if (off || document.hidden || !document.body) return;
+    try {
+      var top = edgeColor(0);
+      var bottom = edgeColor(window.innerHeight - 1);
+      if (!top || !bottom) return;
+      var message = JSON.stringify({ type: 'colors', top: top, bottom: bottom });
+      // Only when they change: most checks send nothing.
+      if (message === lastColors) return;
+      lastColors = message;
+      window.ReactNativeWebView.postMessage(message);
+    } catch (e) {}
+  }
+  document.addEventListener('DOMContentLoaded', sendColors);
+  window.addEventListener('load', sendColors);
 
   // While the blocked card is up (PAUSE_ALL_VIDEOS set the flag), any video
   // that starts playing is stopped again. Media events don't bubble, so this
@@ -225,9 +296,13 @@ export function buildLiteInjection(
     // Back on: report where we are, in case the address changed while off.
     if (!off) send();
   }
-  // Every second, and at once when a box is tapped (before any typing).
+  // Every second, and at once when a box is tapped (before any typing). The
+  // edge colours are checked on the same beat: a new screen inside the site
+  // (a chat, the reel viewer) can change them without a page load.
   setInterval(function () {
-    if (!document.hidden) check();
+    if (document.hidden) return;
+    check();
+    sendColors();
   }, 1000);
   document.addEventListener('focusin', function (event) {
     var box = event.target;
