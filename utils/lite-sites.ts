@@ -23,8 +23,8 @@ export const LITE_FEATURE_NAME = 'Reel-free';
 
 /**
  * Where "Read the code" (Check it yourself) sends people: the public copy of
- * these files, made by scripts/export-reel-free.sh. Until that repo is made
- * public, this link shows GitHub's 404 page.
+ * these files, made by scripts/export-reel-free.sh and published by
+ * scripts/publish-reel-free.sh (public since Oct 14 2026).
  *
  * Keep the address short: it is printed in capitals on one line of the Check
  * it yourself page, about 8pt a letter. This one (34 letters) fits as is on
