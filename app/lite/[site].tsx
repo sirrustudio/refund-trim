@@ -139,6 +139,10 @@ export default function LiteBrowserScreen() {
   const [reminderShown, setReminderShown] = useState(false);
   const [reminderRound, setReminderRound] = useState(0);
   const [blocked, setBlocked] = useState<BlockedState | null>(null);
+  // iOS shut the page down: when it last happened, and whether it happened
+  // twice in a row (then Refund asks instead of reloading again).
+  const lastStopAtRef = useRef(0);
+  const [stopped, setStopped] = useState(false);
   // True while the page loading is a login page: no script is handed over.
   const [scriptOff, setScriptOff] = useState(false);
   // The colours at the page's top and bottom edges, reported by the page
@@ -148,7 +152,8 @@ export default function LiteBrowserScreen() {
     bottom: LiteRgb;
   } | null>(null);
   // First-time help: remembers the first login, which retires the
-  // "password goes to Instagram" line on the Reel-free page.
+  // "password goes to Instagram" line on the Reel-free page, and the first
+  // use of the ⋯ button, which retires its bubble.
   const { intro, markDone } = useLiteIntro();
   // One save per visit is enough; every later page would just repeat it.
   const signedInSavedRef = useRef(false);
@@ -262,8 +267,26 @@ export default function LiteBrowserScreen() {
 
   function retry() {
     setFailed(false);
+    setStopped(false);
     setLoading(true);
     setAttempt((count) => count + 1);
+  }
+
+  // iOS shut the page down, usually to free memory while you were in another
+  // app. The web view then stays blank or frozen until something reloads it,
+  // which used to mean leaving the browser and opening it again. So reload it
+  // here, on the same page. A second stop within 30 seconds means reloading
+  // isn't helping, so ask instead of going round in a loop.
+  function onPageStopped() {
+    const now = Date.now();
+    const stoppedAgain = now - lastStopAtRef.current < 30_000;
+    lastStopAtRef.current = now;
+    if (stoppedAgain) {
+      setStopped(true);
+      return;
+    }
+    setLoading(true);
+    webRef.current?.reload();
   }
 
   function applySettingsAndClose() {
@@ -275,6 +298,7 @@ export default function LiteBrowserScreen() {
     setBlocked(null);
     blockedShownRef.current = false;
     setFailed(false);
+    setStopped(false);
     setLoading(true);
     setAttempt((count) => count + 1);
   }
@@ -308,10 +332,16 @@ export default function LiteBrowserScreen() {
   // `site` is null until the saved switches have loaded (a moment).
   if (!fontsLoaded || !baseSite || !site || !applied) return null;
 
-  // Refund's own cream cover is up (loading, no connection, blocked, gentle
-  // stop): it fills the whole screen, clock and home bar included.
+  // Refund's own cream cover is up (loading, no connection, page stopped,
+  // blocked, gentle stop): it fills the whole screen, clock and home bar
+  // included.
   const coverShown =
-    !NativeWebView || loading || failed || !!blocked || reminderShown;
+    !NativeWebView ||
+    loading ||
+    failed ||
+    stopped ||
+    !!blocked ||
+    reminderShown;
   // Where the page goes. Instagram leaves no room for the clock or the home
   // bar (Safari never puts a page there), so its top bar sat under the clock
   // (seen Oct 14). So the page sits between them, and the two strips are
@@ -320,6 +350,15 @@ export default function LiteBrowserScreen() {
   // colour is unknown (a guess left black bands around a white login page in
   // dark mode), and their form starts low enough to go edge to edge.
   const edgeToEdge = scriptOff;
+  // First-time bubble by the ⋯ button: once signed in, on a plain page. Login
+  // pages, Refund's covers and the settings sheet keep it hidden meanwhile.
+  const menuTipShown =
+    !!intro &&
+    intro.signedInOnce &&
+    !intro.menuTipDone &&
+    !scriptOff &&
+    !coverShown &&
+    !settingsOpen;
   const fallback = isDark ? DARK_PAGE : LIGHT_PAGE;
   const topColor = edgeColors?.top ?? fallback;
   const bottomColor = edgeColors?.bottom ?? fallback;
@@ -415,6 +454,7 @@ export default function LiteBrowserScreen() {
             }}
             onLoadEnd={() => setLoading(false)}
             onError={() => setFailed(true)}
+            onContentProcessDidTerminate={onPageStopped}
             // Videos (a clip a friend sent) play in the page
             // instead of jumping to full screen.
             allowsInlineMediaPlayback
@@ -457,7 +497,7 @@ export default function LiteBrowserScreen() {
               />
             ) : null}
 
-            {NativeWebView && loading && !failed ? (
+            {NativeWebView && loading && !failed && !stopped ? (
               <LiteStatusPanel label={`OPENING ${site.label.toUpperCase()}`} />
             ) : null}
             {failed ? (
@@ -465,6 +505,14 @@ export default function LiteBrowserScreen() {
                 label="NO CONNECTION"
                 line={`Couldn't reach ${site.label}.`}
                 buttonLabel="Try again"
+                onPress={retry}
+              />
+            ) : null}
+            {stopped && !failed ? (
+              <LiteStatusPanel
+                label="PAGE STOPPED"
+                line="The page closed on its own."
+                buttonLabel="Open again"
                 onPress={retry}
               />
             ) : null}
@@ -501,6 +549,17 @@ export default function LiteBrowserScreen() {
               onReload={() => webRef.current?.reload()}
               onShare={shareLink}
               onSettings={() => setSettingsOpen(true)}
+              showTip={menuTipShown}
+              // Saved once: a tap before the bubble ever showed (on the login
+              // page, say) counts too, since the button's been found.
+              onTipDone={() => {
+                if (intro && !intro.menuTipDone) markDone("menuTipDone");
+              }}
+              // Names under the toolbar's icons, the first time it opens.
+              showNames={!!intro && !intro.menuNamesDone}
+              onNamesDone={() => {
+                if (intro && !intro.menuNamesDone) markDone("menuNamesDone");
+              }}
             />
           </View>
         </SafeAreaView>

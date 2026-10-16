@@ -138,8 +138,16 @@ export const LITE_SITES: LiteSite[] = [
     signedInPaths: ['/direct'],
     blockedPaths: [],
     dmReelViewer: true,
-    // The blue "Open app" button (it links to applink.instagram.com).
-    hideSelectors: ['a[href*="applink.instagram.com"]'],
+    hideSelectors: [
+      // The blue "Open app" button (it links to applink.instagram.com).
+      'a[href*="applink.instagram.com"]',
+      // The "Use the app" bar above the tab bar (home, profile, Explore; seen
+      // Oct 15). Its button has no link, so it's matched by shape instead: a
+      // Close × next to one lone button. Its button does nothing here anyway
+      // (the real app's links are refused). The "Close" label follows the
+      // account's language, so in other languages the bar may still show.
+      'div:has(> div > div[role="button"] > div > svg[aria-label="Close"]):has(> div > button:only-child)',
+    ],
     optionalBlocks: [
       {
         id: 'instagram-reels',

@@ -16,7 +16,7 @@ Refund itself is closed source. The pieces around these files (buttons, fonts, t
 
 One script: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 310 lines. Refund hands it to the page as the page starts loading. It does six things:
 
-1. **Hides buttons** that lead to the parts you've switched off (Reels is on by default, Explore is optional), plus Instagram's "Open app" button, with a style rule. The list is in [`utils/lite-sites.ts`](utils/lite-sites.ts).
+1. **Hides buttons** that lead to the parts you've switched off (Reels is on by default, Explore is optional), plus Instagram's "Open app" button and its "Use the app" bar, with a style rule. The list is in [`utils/lite-sites.ts`](utils/lite-sites.ts).
 2. **Reports address changes to Refund.** Instagram often changes its address without loading a new page, so the script tells Refund each new address. Refund then decides whether to show the page or a "switched off here" card.
 3. **Pauses videos** that start playing behind that card.
 4. **Counts reels played in messages**, for the "Reels allowed in DMs" limit. When you pass the limit it sends Refund a short message saying so. To tell reels apart it remembers each video's source address in the page's memory only. That is never sent.

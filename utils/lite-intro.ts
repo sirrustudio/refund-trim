@@ -12,11 +12,17 @@ export type LiteIntro = {
   todayCardDone: boolean;
   /** A signed-in page has loaded once, so the login help is no longer needed. */
   signedInOnce: boolean;
+  /** The browser's ⋯ button has been tapped or dragged, so its bubble retires. */
+  menuTipDone: boolean;
+  /** The toolbar has been opened and closed once, so the names under its icons retire. */
+  menuNamesDone: boolean;
 };
 
 export const EMPTY_LITE_INTRO: LiteIntro = {
   todayCardDone: false,
   signedInOnce: false,
+  menuTipDone: false,
+  menuNamesDone: false,
 };
 
 /** Stored data is checked, not trusted: only a real `true` counts as done. */
@@ -27,6 +33,8 @@ export async function loadLiteIntro(): Promise<LiteIntro> {
   return {
     todayCardDone: data.todayCardDone === true,
     signedInOnce: data.signedInOnce === true,
+    menuTipDone: data.menuTipDone === true,
+    menuNamesDone: data.menuNamesDone === true,
   };
 }
 
