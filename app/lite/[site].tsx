@@ -104,7 +104,7 @@ export default function LiteBrowserScreen() {
   // page is actually using. They meet when the sheet closes ("Done"), so the
   // page reloads once instead of after every tap.
   const liteSettings = useLiteSettings();
-  // Usually already known (the Reel-free page loaded it), so the page starts
+  // Usually already known (the Trim page loaded it), so the page starts
   // at once.
   const [applied, setApplied] = useState<LiteSettings | null>(() =>
     peekLiteSettings(),
@@ -152,7 +152,7 @@ export default function LiteBrowserScreen() {
     bottom: LiteRgb;
   } | null>(null);
   // First-time help: remembers the first login, which retires the
-  // "password goes to Instagram" line on the Reel-free page, and the first
+  // "password goes to Instagram" line on the Trim page, and the first
   // use of the ⋯ button, which retires its bubble.
   const { intro, markDone } = useLiteIntro();
   // One save per visit is enough; every later page would just repeat it.
@@ -258,7 +258,7 @@ export default function LiteBrowserScreen() {
     );
   }
 
-  // Home leaves the browser for the Reel-free page that opened it. If there
+  // Home leaves the browser for the Trim page that opened it. If there
   // is nothing to go back to (opened from a link), go to that page itself.
   function leaveToPage() {
     if (router.canGoBack()) router.back();

@@ -16,15 +16,15 @@ export const LITE_APPS_ENABLED = true;
  * and storage keep saying "lite", so a rename is this one line.
  *
  * No "Instagram" in it on purpose: Meta's brand rules say not to combine the
- * Instagram name with generic words (so not "Reel-free Instagram"). The page
+ * Instagram name with generic words (so not "Trim Instagram"). The page
  * still says "Instagram" where it only describes what opens, which they allow.
  */
-export const LITE_FEATURE_NAME = 'Reel-free';
+export const LITE_FEATURE_NAME = 'Trim';
 
 /**
  * Where "Read the code" (Check it yourself) sends people: the public copy of
- * these files, made by scripts/export-reel-free.sh and published by
- * scripts/publish-reel-free.sh (public since Oct 14 2026).
+ * these files, made by scripts/export-trim.sh and published by
+ * scripts/publish-trim.sh (public since Oct 14 2026).
  *
  * Keep the address short: it is printed in capitals on one line of the Check
  * it yourself page, about 8pt a letter. This one (34 letters) fits as is on

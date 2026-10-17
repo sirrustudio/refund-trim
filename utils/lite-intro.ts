@@ -4,7 +4,7 @@ import { loadJson } from '@/utils/loadJson';
 const KEY = 'liteIntro';
 
 /**
- * The first-time help around Reel-free, each shown until it's done.
+ * The first-time help around Trim, each shown until it's done.
  * One key, so a reset clears them together.
  */
 export type LiteIntro = {
