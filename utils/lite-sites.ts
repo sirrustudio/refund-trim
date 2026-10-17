@@ -58,6 +58,22 @@ export type LiteOptionalBlock = {
   hideSelectors: string[];
   /** Replaces the blocked card's line while this switch is on. */
   blockedLine?: string;
+  /** This switch is the site's bar copy (see LiteBarCopy): shown only while on. */
+  turnsOnBarCopy?: boolean;
+};
+
+/**
+ * Instagram's website leaves its bottom bar out of some pages (the chat
+ * lists), so you had to go back to leave them. On those pages the page script
+ * shows a copy of the site's OWN bar (its icons, your photo), made inside the
+ * page from the last one it saw. The copy lives in the page's own storage on
+ * the phone: Refund never reads it, so nothing private reaches Refund.
+ */
+export type LiteBarCopy = {
+  /** A link only the site's own bottom bar has, to find that bar. */
+  siteBarAnchor: string;
+  /** Path prefixes (whole pieces) where the copy is shown. */
+  copyOnPaths: string[];
 };
 
 export type LiteSite = {
@@ -106,6 +122,13 @@ export type LiteSite = {
   dmReelViewer?: boolean;
   /** CSS selectors hidden so people aren't tempted. Fragile by nature. */
   hideSelectors: string[];
+  /**
+   * Whole CSS rules that move things rather than hide them. Same style tag
+   * as hideSelectors, so the same off switch (a password box) covers them.
+   */
+  styleRules?: string[];
+  /** A copy of the site's own bottom bar on pages without one (see LiteBarCopy). */
+  barCopy?: LiteBarCopy;
   /** Switches the user can flip (see LiteOptionalBlock). */
   optionalBlocks?: LiteOptionalBlock[];
   /**
@@ -148,6 +171,24 @@ export const LITE_SITES: LiteSite[] = [
       // account's language, so in other languages the bar may still show.
       'div:has(> div > div[role="button"] > div > svg[aria-label="Close"]):has(> div > button:only-child)',
     ],
+    styleRules: [
+      // Your profile's top row puts the settings gear on the left and Threads
+      // on the right. Flipped, the gear sits top right like the Instagram app.
+      // Matched by the settings link, which doesn't change with the language.
+      'header > div:has(> div > a[href^="/accounts/settings/"]){flex-direction:row-reverse !important;}',
+      // Each icon sits in a 64pt box, pushed to the side that faced the
+      // screen's edge. Swapped, that side faces the middle (56pt in, not 16):
+      // so each is pushed to its box's other side.
+      'header > div:has(> div > a[href^="/accounts/settings/"]) > div:has(> a[href^="/accounts/settings/"]){justify-content:flex-end !important;}',
+      'header > div:has(> div > a[href^="/accounts/settings/"]) > div:last-child{justify-content:flex-start !important;}',
+    ],
+    barCopy: {
+      // Instagram's bar is the only pinned strip with the inbox link (Oct 16).
+      siteBarAnchor: 'a[href="/direct/inbox/"]',
+      // The chat lists only: inside a chat ("/direct/t/…") it goes, like the
+      // Instagram app, so the chat gets the whole screen (Oct 16).
+      copyOnPaths: ['/direct/inbox', '/direct/requests'],
+    },
     optionalBlocks: [
       {
         id: 'instagram-reels',
@@ -186,6 +227,18 @@ export const LITE_SITES: LiteSite[] = [
         allowOnlyPaths: ['/direct', '/accounts', '/challenge', '/two_factor'],
         hideSelectors: [],
         blockedLine: 'Only messages are open here.',
+      },
+      {
+        // Not a block: the copy of Instagram's bar on the chat list (see
+        // barCopy above). A switch so it can be turned off (Oct 16).
+        id: 'instagram-dm-bar',
+        label: 'Bar in DMs',
+        description: "Instagram's bottom bar on your chat list too.",
+        defaultOn: true,
+        beta: true,
+        blockedPaths: [],
+        hideSelectors: [],
+        turnsOnBarCopy: true,
       },
     ],
     mainBlockId: 'instagram-reels',
@@ -228,6 +281,14 @@ export function applyLiteBlocks(
     blockedLine:
       [...on].reverse().find((b) => b.blockedLine)?.blockedLine ??
       site.blockedLine,
+    // The bar copy needs its switch on, and has no place in "only these"
+    // mode: every other button on it would lead to a closed page.
+    barCopy:
+      onlyPaths.length === 0 &&
+      (!site.optionalBlocks?.some((b) => b.turnsOnBarCopy) ||
+        on.some((b) => b.turnsOnBarCopy))
+        ? site.barCopy
+        : undefined,
   };
 }
 

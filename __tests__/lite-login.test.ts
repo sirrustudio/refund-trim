@@ -70,6 +70,8 @@ function runScriptAt(path: string) {
     head,
     createElement: () => style,
     querySelector: () => (page.hasPasswordBox ? {} : null),
+    // The bottom-bar finder looks for the site's own bar: none on this page.
+    querySelectorAll: () => [],
     addEventListener: (name: string, listener: (event: unknown) => void) => {
       listeners[name] = listener;
     },
