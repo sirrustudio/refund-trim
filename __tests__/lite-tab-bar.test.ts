@@ -114,6 +114,7 @@ class FakeElement {
 function overlay(role: string, top: number, bottom: number) {
   const el = Object.assign(new FakeElement("div"), {
     getBoundingClientRect: () => ({ top, bottom, height: bottom - top }),
+    getClientRects: () => [{}],
   });
   el.setAttribute("role", role);
   return el;
@@ -252,9 +253,19 @@ describe("on a fake chat list", () => {
     expect(page.bar()).toBeDefined();
   });
 
-  it("hides while a dialog is open", () => {
+  it("hides for a reply box just above it, in the layer it lifts", () => {
     const page = openPage("/direct/inbox/");
-    page.show(overlay("dialog", 200, 600));
+    page.show(overlay("textbox", 740, 784));
+    jest.advanceTimersByTime(2000);
+    expect(page.bar()).toBeUndefined();
+  });
+
+  it.each([
+    ["with a size", 200, 600],
+    ["whose wrapper has no height", 0, 0],
+  ])("hides while a dialog is open, %s", (_name, top, bottom) => {
+    const page = openPage("/direct/inbox/");
+    page.show(overlay("dialog", top, bottom));
     jest.advanceTimersByTime(2000);
     expect(page.bar()).toBeUndefined();
   });

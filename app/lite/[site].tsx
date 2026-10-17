@@ -70,8 +70,11 @@ function loadWebView(): typeof WebView | null {
 }
 const NativeWebView = loadWebView();
 
-/** Time in the background after which the page is refreshed on return. */
-const REFRESH_AFTER_MS = 30_000;
+/**
+ * Time in the background after which the page is refreshed on return. Long
+ * enough that a quick trip out never shows Instagram's loading screen.
+ */
+const REFRESH_AFTER_MS = 5 * 60_000;
 
 /** Edge colours until the page reports its own: Instagram's light and dark backgrounds. */
 const LIGHT_PAGE: LiteRgb = { r: 255, g: 255, b: 255 };

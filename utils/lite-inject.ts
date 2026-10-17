@@ -330,18 +330,19 @@ export function buildLiteInjection(
   }
 
   // A friend's note opens over the list without removing it, with its reply
-  // box at the bottom. So the copy also hides for any dialog, or any text
-  // field reaching into its strip. Only positions are read.
+  // box at the bottom. So the copy also hides for any open dialog (even a
+  // zero-height wrapper), or any text field near the bottom: under the copy,
+  // or just above it in the layer the copy lifts. Only positions are read.
   const OVER_LIST =
-    '[role="dialog"],[role="textbox"],textarea,input[type="text"],[contenteditable]:not([contenteditable="false"])';
+    '[role="dialog"],[aria-modal="true"],[role="textbox"],textarea,input[type="text"],input:not([type]),[contenteditable]:not([contenteditable="false"])';
   function somethingOverList() {
     const found = document.querySelectorAll(OVER_LIST);
     for (let i = 0; i < found.length; i++) {
-      if (copy && copy.contains(found[i])) continue;
-      const box = found[i].getBoundingClientRect();
-      if (!box.height || box.top >= window.innerHeight) continue;
-      if (found[i].getAttribute('role') === 'dialog') return true;
-      if (box.bottom > window.innerHeight - BAR_HEIGHT) return true;
+      const el = found[i];
+      if ((copy && copy.contains(el)) || !el.getClientRects().length) continue;
+      if (el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true') return true;
+      const box = el.getBoundingClientRect();
+      if (box.height && box.top < window.innerHeight && box.bottom > window.innerHeight - BAR_HEIGHT - 80) return true;
     }
     return false;
   }
