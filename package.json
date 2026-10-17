@@ -2,7 +2,7 @@
   "name": "refund-trim",
   "version": "0.0.0",
   "private": true,
-  "description": "A read-only copy of the code behind Reel-free, a page in the Refund iPhone app.",
+  "description": "A read-only copy of the code behind Trim, a page in the Refund iPhone app.",
   "license": "MIT",
   "scripts": {
     "test": "jest"

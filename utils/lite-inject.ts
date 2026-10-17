@@ -1,45 +1,59 @@
-// The small script Lite runs inside the page: layers 2 and 3 of its blocking
-// (layer 1 is the web view's own check of every full page load).
+// The script Lite injects into the site's page, and the parsers for the
+// messages it sends back.
 //
-// Why it's needed: Instagram is a "single-page app". Tapping
-// Reels often loads NO new page: the site's JavaScript swaps the screen and
-// changes the address. The web view's normal "should I load this?" check only
-// sees full loads, so this script reports every address change back to us.
-import type { LiteSite } from '@/utils/lite-sites';
+// Blocking works in three layers:
+//   1. onShouldStartLoadWithRequest checks every full page load ([site].tsx).
+//   2. This script reports URL changes made with history.pushState. Instagram
+//      is a single-page app, so most navigation never loads a new page.
+//   3. This script hides links to blocked sections with CSS.
+import type { LiteSite } from "@/utils/lite-sites";
 
-/** A colour as three 0-255 numbers. */
+/** An RGB colour, each channel 0-255. */
 export type LiteRgb = { r: number; g: number; b: number };
 
 export type LiteMessage =
-  | { type: 'nav'; url: string }
-  | { type: 'reelLimit' }
-  | { type: 'colors'; top: LiteRgb; bottom: LiteRgb };
+  | { type: "nav"; url: string }
+  | { type: "reelLimit" }
+  | { type: "colors"; top: LiteRgb; bottom: LiteRgb };
 
 /**
- * Pauses every video on the page. Run when the blocked card goes up: the card
- * hides the page, but a reel the site already started would keep playing its
- * sound behind it. The flag keeps pausing any video that starts AFTER this
- * (the site may start the reel a moment later); leaving the card loads a new
- * page, which clears it.
+ * Injected when the blocked card goes up, since a reel that already started
+ * would keep playing audio behind it. The flag keeps pausing videos that
+ * start later, until the next page load.
  */
 export const PAUSE_ALL_VIDEOS = `
 window.__refundLiteBlocked = true;
 Array.prototype.forEach.call(document.getElementsByTagName('video'), function (v) {
-  try { v.pause(); } catch (e) {}
+  try { v.pause(); } catch {}
 });
 true;
 `;
 
-/** Longest address we accept from the page, so a strange page can't flood us. */
+/**
+ * Injected when the app comes back after a while: the page stops updating in
+ * the background, so new messages and notes wouldn't show. Skipped while a
+ * text field has focus, so a half-typed message isn't lost. Only focus is
+ * checked, never what's in the field.
+ */
+export const RELOAD_UNLESS_TYPING = `
+(function () {
+  const el = document.activeElement;
+  const typing = !!el && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName));
+  if (!typing) location.reload();
+})();
+true;
+`;
+
+/** Longest URL we accept from the page. */
 const MAX_URL_LENGTH = 2048;
 
 /**
- * Reads a CSS colour the page sent ("rgb(0, 0, 0)" or "rgba(…)"). Only those
- * two shapes with numbers 0-255 pass, so the page can't hand us anything else
- * to paint with; the alpha is dropped (the script only sends solid colours).
+ * Parses a colour sent by the page. Only "rgb(r, g, b)" and "rgba(r, g, b, a)"
+ * with channels 0-255 pass, so the page can only ever hand us three numbers.
+ * Alpha is dropped; the script only sends opaque colours.
  */
 export function parseLiteColor(value: unknown): LiteRgb | null {
-  if (typeof value !== 'string' || value.length > 40) return null;
+  if (typeof value !== "string" || value.length > 40) return null;
   const match = /^rgba?\((\d{1,3}), ?(\d{1,3}), ?(\d{1,3})(, ?[\d.]+)?\)$/.exec(
     value,
   );
@@ -49,7 +63,7 @@ export function parseLiteColor(value: unknown): LiteRgb | null {
   return { r, g, b };
 }
 
-/** Reads a message from the page. Anything unexpected returns null. */
+/** Validates a message from the page. Returns null for anything unexpected. */
 export function parseLiteMessage(raw: string): LiteMessage | null {
   try {
     const data = JSON.parse(raw) as {
@@ -58,89 +72,84 @@ export function parseLiteMessage(raw: string): LiteMessage | null {
       top?: unknown;
       bottom?: unknown;
     };
-    if (data.type === 'reelLimit') return { type: 'reelLimit' };
-    if (data.type === 'colors') {
+    if (data.type === "reelLimit") return { type: "reelLimit" };
+    if (data.type === "colors") {
       const top = parseLiteColor(data.top);
       const bottom = parseLiteColor(data.bottom);
-      return top && bottom ? { type: 'colors', top, bottom } : null;
+      return top && bottom ? { type: "colors", top, bottom } : null;
     }
     if (
-      data.type === 'nav' &&
-      typeof data.url === 'string' &&
+      data.type === "nav" &&
+      typeof data.url === "string" &&
       data.url.length <= MAX_URL_LENGTH
     ) {
-      return { type: 'nav', url: data.url };
+      return { type: "nav", url: data.url };
     }
   } catch {
-    // Not JSON: not ours.
+    // Not JSON, so not ours.
   }
   return null;
 }
 
 /**
- * The copy of the site's bottom bar (see LiteBarCopy). Its colours are the
- * page's own (Instagram's colour variables), so it matches light and dark.
- * On the message pages the screen's pinned layer gets a marker that lifts its
- * bottom edge above the copy; while the keyboard is up both go back, so the
- * typing box sits on the keyboard.
+ * The bottom bar copy (see LiteBarCopy), in Instagram's own colour variables
+ * so it follows dark mode. [data-refund-room] is the chat list's fixed layer,
+ * shortened to end above the copy; refund-lite-typing undoes both.
  */
 const BAR_COPY_CSS = [
-  // Laid out like the site's own bar (measured Oct 16): a 1pt line, then
-  // 48pt buttons with equal gaps. A switched-off button (Reels) shrinks its
-  // slot to nothing but the slot still gets its gaps, as in the site's bar,
-  // so the icons line up with it exactly.
-  '#refund-lite-bar{position:fixed;left:0;right:0;bottom:0;height:50px;box-sizing:border-box;display:flex;justify-content:space-evenly;align-items:flex-start;z-index:2147483000;',
-  'background:rgb(var(--ig-primary-background,255,255,255));border-top:1px solid rgb(var(--ig-elevated-separator,219,219,219));color:rgb(var(--ig-primary-text,0,0,0));}',
-  '#refund-lite-bar > div{display:flex;}',
-  '#refund-lite-bar a{width:48px;height:48px;display:flex;align-items:center;justify-content:center;color:inherit;-webkit-tap-highlight-color:transparent;}',
-  '#refund-lite-bar img{width:24px;height:24px;border-radius:50%;object-fit:cover;}',
-  // The page you're on, filled in the way the site fills its own.
-  '#refund-lite-bar .refund-here svg path,#refund-lite-bar .refund-here svg circle,#refund-lite-bar .refund-here svg polygon{fill:currentColor;}',
-  '#refund-lite-bar .refund-here svg line{stroke:rgb(var(--ig-primary-background,255,255,255));}',
-  // The site also sets that layer's height to the full screen: capped too.
-  'html.refund-lite-copy [data-refund-room]{bottom:50px !important;height:auto !important;min-height:0 !important;max-height:calc(100% - 50px) !important;}',
-  'html.refund-lite-typing #refund-lite-bar{display:none !important;}',
-  'html.refund-lite-typing [data-refund-room]{bottom:0 !important;max-height:none !important;}',
-  // Only the filled "you're here" drawing is known yet (the page has only
-  // been seen from there): shown as its outline, so it doesn't look selected.
-  '#refund-lite-bar .refund-outline svg path{fill:none;stroke:currentColor;stroke-width:2;}',
-].join('');
+  // Laid out like the site's bar. A hidden button (Reels) leaves an empty
+  // slot that still takes its share of the space, as on the site.
+  "#refund-lite-bar{position:fixed;left:0;right:0;bottom:0;height:50px;box-sizing:border-box;display:flex;justify-content:space-evenly;align-items:flex-start;z-index:2147483000;",
+  "background:rgb(var(--ig-primary-background,255,255,255));border-top:1px solid rgb(var(--ig-elevated-separator,219,219,219));color:rgb(var(--ig-primary-text,0,0,0));}",
+  "#refund-lite-bar > div{display:flex;}",
+  "#refund-lite-bar a{width:48px;height:48px;display:flex;align-items:center;justify-content:center;color:inherit;-webkit-tap-highlight-color:transparent;}",
+  "#refund-lite-bar img{width:24px;height:24px;border-radius:50%;object-fit:cover;}",
+  // The current section's icon, filled the way the site fills it.
+  "#refund-lite-bar .refund-here svg path,#refund-lite-bar .refund-here svg circle,#refund-lite-bar .refund-here svg polygon{fill:currentColor;}",
+  "#refund-lite-bar .refund-here svg line{stroke:rgb(var(--ig-primary-background,255,255,255));}",
+  // The site also gives that layer a full-screen height, so cap it.
+  "html.refund-lite-copy [data-refund-room]{bottom:50px !important;height:auto !important;min-height:0 !important;max-height:calc(100% - 50px) !important;}",
+  "html.refund-lite-typing #refund-lite-bar{display:none !important;}",
+  "html.refund-lite-typing [data-refund-room]{bottom:0 !important;max-height:none !important;}",
+  // Only the selected (filled) icon was ever seen: draw it as an outline.
+  "#refund-lite-bar .refund-outline svg path{fill:none;stroke:currentColor;stroke-width:2;}",
+].join("");
 
 /**
- * Builds the injected script for one site. Only the address (`location.href`)
- * and the colours at the page's top and bottom edges are sent back — never
- * page content, never anything typed.
+ * Builds the injected script for one site. It sends back only the current
+ * URL, the page's edge colours and a "reel limit reached" signal. Never page
+ * content or anything typed.
  */
 export function buildLiteInjection(
   site: LiteSite,
   options: { reelLimit: number },
 ): string {
   const hideRule = site.hideSelectors.length
-    ? `${site.hideSelectors.join(',')}{display:none !important;}`
-    : '';
-  // A whole number 0-99 only, since it is written into the script text.
+    ? `${site.hideSelectors.join(",")}{display:none !important;}`
+    : "";
+  // An integer 0-99, since it's written straight into the script.
   const reelLimit = Math.max(
     0,
     Math.min(99, Math.floor(options.reelLimit) || 0),
   );
-  const styleRules = (site.styleRules ?? []).join('');
-  const copyRules = site.barCopy ? BAR_COPY_CSS : '';
-  // JSON.stringify makes the CSS a safe JS string literal.
+  const styleRules = (site.styleRules ?? []).join("");
+  const copyRules = site.barCopy ? BAR_COPY_CSS : "";
+  // Written into the script as JS literals; it runs in the page and can't
+  // import lite-sites.ts.
   const css = JSON.stringify(hideRule + styleRules + copyRules);
-  // Where the copy of the site's bottom bar goes (see LiteBarCopy).
-  const barAnchor = JSON.stringify(site.barCopy?.siteBarAnchor ?? '');
+  const barAnchor = JSON.stringify(site.barCopy?.siteBarAnchor ?? "");
   const copyPaths = JSON.stringify(site.barCopy?.copyOnPaths ?? []);
-  // The login pages, written into the script: it runs inside the page and
-  // can't read lite-sites.ts.
+  const listAnchor = JSON.stringify(site.barCopy?.listAnchor ?? "");
   const noScriptPaths = JSON.stringify(site.noScriptPaths ?? []);
 
   return `
 (function () {
-  // Backup for the screen's own check (it hands over no script for a login
-  // page): if this IS a login page, stop before doing anything. Same "whole
-  // path piece" rule as isNoScriptUrl in lite-filter.ts.
-  var path = location.pathname.toLowerCase();
-  var onLoginPage = ${noScriptPaths}.some(function (p) {
+  // Errors are caught and dropped throughout: a bug in this script must
+  // never break Instagram's own page.
+
+  // Backup for isNoScriptUrl in lite-filter.ts: never run on a login page.
+  const path = location.pathname.toLowerCase();
+  const onLoginPage = ${noScriptPaths}.some(function (p) {
     return path === p || path.indexOf(p + '/') === 0;
   });
   if (onLoginPage) return;
@@ -148,15 +157,13 @@ export function buildLiteInjection(
   if (window.__refundLite) return; // already injected on this page
   window.__refundLite = true;
 
-  // OFF while a password box is on the page, whatever the address (Instagram
-  // also shows its login form at "/", the same address as the home feed).
-  // While off, every part below does nothing: it sends nothing, hides
-  // nothing, counts nothing. It looks only at WHETHER such a box exists,
-  // never at what is typed in it. name="password" is matched too because
-  // "Show" turns the box into plain text; one-time-code is the 2FA box.
-  var PASSWORD_BOX =
+  // Everything below is off while a password field is on the page, on any URL
+  // (Instagram also shows its login form at "/"). Only the field's presence
+  // is checked, never its value. name="password" still matches after "Show"
+  // makes it type="text"; one-time-code is the 2FA field.
+  const PASSWORD_FIELD =
     'input[type="password"],input[name="password"],input[autocomplete="one-time-code"]';
-  var off = false;
+  let off = false;
 
   function send() {
     if (off) return;
@@ -164,16 +171,15 @@ export function buildLiteInjection(
       window.ReactNativeWebView.postMessage(
         JSON.stringify({ type: 'nav', url: location.href })
       );
-    } catch (e) {}
-    // A new screen may need the bar copy, or no longer (see below).
-    refreshBarCopy();
+    } catch {}
+    refreshBarCopy(); // the new screen may need the bar copy, or not
   }
 
-  // Layer 2: the site changes the address without loading a page.
+  // Layer 2: URL changes that don't load a page.
   ['pushState', 'replaceState'].forEach(function (name) {
-    var original = history[name];
+    const original = history[name];
     history[name] = function () {
-      var result = original.apply(this, arguments);
+      const result = original.apply(this, arguments);
       send();
       return result;
     };
@@ -181,84 +187,65 @@ export function buildLiteInjection(
   window.addEventListener('popstate', send);
   window.addEventListener('hashchange', send);
 
-  // Edge colours. Refund keeps the page clear of the clock and the home bar
-  // (Instagram's top bar would sit under the clock: Safari never puts a page
-  // there, so the site leaves no room for it) and paints those two strips to
-  // match. This reads the background colour of whatever is at the page's top
-  // and bottom edge: the first solid one, walking up from the element there.
+  // Edge colours for the safe-area strips the app paints around the page:
+  // the first opaque background at y, walking up from the element there.
   function edgeColor(y) {
-    var node = document.elementFromPoint(window.innerWidth / 2, y);
+    let node = document.elementFromPoint(window.innerWidth / 2, y);
     while (node && node.nodeType === 1) {
-      var color = getComputedStyle(node).backgroundColor;
-      // "transparent" and see-through colours (alpha 0) are skipped.
+      const color = getComputedStyle(node).backgroundColor;
       if (color && color !== 'transparent' && !/^rgba\\(.*, 0\\)$/.test(color)) {
         return color;
       }
       node = node.parentElement;
     }
-    // Nothing solid there: send nothing and keep the colour we have.
-    return null;
+    return null; // nothing opaque: keep the current colour
   }
-  var lastColors = '';
+  let lastColors = '';
   function sendColors() {
     if (off || document.hidden || !document.body) return;
     try {
-      var top = edgeColor(0);
-      var bottom = edgeColor(window.innerHeight - 1);
+      const top = edgeColor(0);
+      const bottom = edgeColor(window.innerHeight - 1);
       if (!top || !bottom) return;
-      var message = JSON.stringify({ type: 'colors', top: top, bottom: bottom });
-      // Only when they change: most checks send nothing.
-      if (message === lastColors) return;
+      const message = JSON.stringify({ type: 'colors', top: top, bottom: bottom });
+      if (message === lastColors) return; // only send changes
       lastColors = message;
       window.ReactNativeWebView.postMessage(message);
-    } catch (e) {}
+    } catch {}
   }
   document.addEventListener('DOMContentLoaded', sendColors);
   window.addEventListener('load', sendColors);
 
-  // While the blocked card is up (PAUSE_ALL_VIDEOS set the flag), any video
-  // that starts playing is stopped again. Media events don't bubble, so this
-  // listens while they travel down (capture).
+  // While the blocked card is up, pause any video that starts. Media events
+  // don't bubble, so this listens in the capture phase.
   document.addEventListener('play', function (event) {
     if (off || !window.__refundLiteBlocked) return;
-    var video = event.target;
+    const video = event.target;
     if (video && video.tagName === 'VIDEO') {
-      try { video.pause(); } catch (e) {}
+      try { video.pause(); } catch {}
     }
   }, true);
 
-  // Reel limit inside the DMs. The message viewer plays reels on top of the
-  // conversation and never changes the address (checked on a real phone), so
-  // an address rule can't see them. Instead we count the big videos that play:
-  // each new reel is a new video source. Past the limit the video is paused and
-  // the app is told, which shows a card and sends you back to the chat.
-  // The count is per viewing: it starts again once the viewer has been closed
-  // for a moment, so opening the NEXT friend's reel gets a fresh allowance.
-  // Judged by what is on screen and by the video's own source, not by class
-  // names, which change often. Not verified against every version of the viewer.
-  //
-  // Kept cheap on purpose: measuring a video (getBoundingClientRect) makes
-  // the browser lay the page out, so we measure ONE video at a time, and
-  // only when something happened: a video started, or a reel was counted and
-  // we're waiting for the viewer to close. Small chat previews cost nothing.
+  // DM reel limit. The DM viewer plays reels without changing the URL, so
+  // count near-full-screen videos by source URL instead. getBoundingClientRect
+  // forces a layout, so only measure on 'playing' or while a counted reel
+  // might still be open.
   if (${reelLimit} > 0) {
-    var seen = {};
-    var count = 0;
-    var lastReel = null;   // the video element counted last
-    var lastSeenAt = 0;    // when lastReel was last seen big on screen
+    let seen = {};
+    let count = 0;
+    let lastReel = null; // the last video counted
+    let lastSeenAt = 0; // when lastReel was last seen full screen
 
-    // Is THIS video near-full-screen inside the DMs? One measurement.
-    var isBig = function (video) {
+    const isBig = function (video) {
       if (location.pathname.indexOf('/direct/') !== 0) return false;
-      var height = window.innerHeight;
-      var box = video.getBoundingClientRect();
+      const height = window.innerHeight;
+      const box = video.getBoundingClientRect();
       return box.height > height * 0.6 && box.bottom > 0 && box.top < height;
     };
 
-    // Counts the video if it is a new reel. Returns true once it is counted
-    // (or was already), so the callers can stop re-checking it.
-    var countIfReel = function (video) {
-      var key = video.currentSrc || video.src;
+    // True once the video is counted, now or earlier.
+    const countIfReel = function (video) {
+      const key = video.currentSrc || video.src;
       if (!key) return false;
       if (seen[key]) return true;
       if (!isBig(video)) return false;
@@ -268,21 +255,20 @@ export function buildLiteInjection(
       count += 1;
       if (count > ${reelLimit}) {
         Array.prototype.forEach.call(document.getElementsByTagName('video'), function (v) {
-          try { v.pause(); } catch (e) {}
+          try { v.pause(); } catch {}
         });
         try {
           window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'reelLimit' }));
-        } catch (e) {}
+        } catch {}
       }
       return true;
     };
 
-    // 'playing' fires once when a video starts, not several times a second.
-    // The viewer animates open, so a reel can start small and grow: re-check
-    // it twice more, then leave it alone.
-    var onPlaying = function (event) {
+    // The viewer animates open, so a reel can start small: check again after
+    // 300ms and 1s.
+    const onPlaying = function (event) {
       if (off) return;
-      var video = event.target;
+      const video = event.target;
       if (!video || video.tagName !== 'VIDEO') return;
       if (countIfReel(video)) return;
       setTimeout(function () {
@@ -290,13 +276,10 @@ export function buildLiteInjection(
         setTimeout(function () { countIfReel(video); }, 700);
       }, 300);
     };
-    // Media events don't bubble, so listen while they travel down (capture).
     document.addEventListener('playing', onPlaying, true);
 
-    // Viewer closed for over 1.5s (not just the gap between two reels): reset,
-    // so the NEXT friend's reel gets a fresh allowance. Only the last counted
-    // reel is watched: gone from the page costs nothing, still there costs
-    // one measurement. Nothing runs while no reel has been counted.
+    // Reset once the viewer has been closed for 1.5s (longer than the gap
+    // between two reels), so the next conversation starts fresh.
     setInterval(function () {
       if (off || document.hidden || !lastReel) return;
       if (lastReel.isConnected && isBig(lastReel)) { lastSeenAt = Date.now(); return; }
@@ -308,67 +291,90 @@ export function buildLiteInjection(
     }, 500);
   }
 
-  // Layer 3: hide the buttons that lead to the switched-off parts.
-  var css = ${css};
-  var style = null;
+  // Layer 3: hide links to blocked sections.
+  const css = ${css};
+  let style = null;
   if (css) {
     style = document.createElement('style');
-    // Named so it's easy to find with Safari's Web Inspector: present = on.
-    style.id = 'refund-lite-style';
+    style.id = 'refund-lite-style'; // easy to spot in Web Inspector
     style.textContent = css;
     (document.head || document.documentElement).appendChild(style);
   }
 
-  // The site's own bottom bar on pages without one. Instagram's website
-  // leaves it out of the message pages, so you had to go back to get
-  // anywhere. There, this shows a copy of the site's OWN bar (its icons, your
-  // photo), rebuilt from the last one seen on another page. The copy is kept
-  // in the PAGE's own storage on this phone: none of it is ever sent to
-  // Refund, so Refund never learns your photo or username.
-  var BAR_ANCHOR = ${barAnchor};
-  var COPY_PATHS = ${copyPaths};
-  var BAR_KEY = 'refundLiteBar';
-  var BAR_HEIGHT = 50;
-  var SAFE_PATH = /^\\/[A-Za-z0-9._\\/-]*$/;
-  var siteBar = null; // the site's own bar, once found
-  // Links found NOT to be in it, and when: looked at again after a moment.
-  var notInBar = typeof WeakMap === 'function' ? new WeakMap() : null;
-  var savedFor = ''; // the bar and page last saved, to skip repeat writes
-  var copy = null; // the copy, while it's on the page
-  var copyShown = false; // the page-wide class that lifts the message screen
+  // Bottom bar copy (see LiteBarCopy). Saved from the site's bar on other
+  // pages into the page's own storage, and never sent to the app.
+  const BAR_ANCHOR = ${barAnchor};
+  const COPY_PATHS = ${copyPaths};
+  const LIST_ANCHOR = ${listAnchor};
+  const BAR_KEY = 'refundLiteBar';
+  const BAR_HEIGHT = 50;
+  const SAFE_PATH = /^\\/[A-Za-z0-9._\\/-]*$/;
+  let siteBar = null; // the site's own bar, once found
+  const notInBar = new WeakMap(); // anchor link outside the bar -> when seen
+  let savedFor = ''; // path of the last save, to skip repeat writes
+  let copy = null; // the copy, while it's in the DOM
+  let copyShown = false; // whether <html> has the refund-lite-copy class
+
+  // A note opened over the list keeps the URL but removes LIST_ANCHOR. If
+  // the anchor was never seen on this path (layouts vary by account), assume
+  // the list is showing: better a bar over a note than none on the list.
+  let listSeenOn = '';
+  function listShowing() {
+    if (!LIST_ANCHOR) return true;
+    const el = document.querySelector(LIST_ANCHOR);
+    if (el && el.getClientRects().length) {
+      listSeenOn = location.pathname;
+      return true;
+    }
+    return listSeenOn !== location.pathname;
+  }
+
+  // A friend's note opens over the list without removing it, with its reply
+  // box at the bottom. So the copy also hides for any dialog, or any text
+  // field reaching into its strip. Only positions are read.
+  const OVER_LIST =
+    '[role="dialog"],[role="textbox"],textarea,input[type="text"],[contenteditable]:not([contenteditable="false"])';
+  function somethingOverList() {
+    const found = document.querySelectorAll(OVER_LIST);
+    for (let i = 0; i < found.length; i++) {
+      if (copy && copy.contains(found[i])) continue;
+      const box = found[i].getBoundingClientRect();
+      if (!box.height || box.top >= window.innerHeight) continue;
+      if (found[i].getAttribute('role') === 'dialog') return true;
+      if (box.bottom > window.innerHeight - BAR_HEIGHT) return true;
+    }
+    return false;
+  }
 
   function onCopyPage() {
-    var p = location.pathname.toLowerCase();
+    const p = location.pathname.toLowerCase();
     return COPY_PATHS.some(function (c) {
       return p === c || p.indexOf(c + '/') === 0;
     });
   }
 
-  // The short strip pinned to the screen's bottom edge that holds
-  // BAR_ANCHOR (a chat's back link to the inbox sits in the full-screen
-  // message layer instead, which is far taller). Reused while it stays on the
-  // page, so scrolling costs nothing. A link found elsewhere is left alone for
-  // 1.5 seconds, not for good: while the page is being built the site's bar
-  // can briefly sit inside a bigger pinned layer (Oct 16).
+  // The site's bar is the short fixed strip at the bottom holding BAR_ANCHOR.
+  // A match elsewhere is skipped for 1.5s, not for good: while the page
+  // boots, the bar can briefly sit inside a bigger fixed layer.
   function findSiteBar() {
     if (siteBar && siteBar.isConnected && siteBar.querySelector(BAR_ANCHOR)) {
       return siteBar;
     }
     siteBar = null;
-    var links = document.querySelectorAll(BAR_ANCHOR);
-    for (var i = 0; i < links.length; i++) {
+    const links = document.querySelectorAll(BAR_ANCHOR);
+    for (let i = 0; i < links.length; i++) {
       if (copy && copy.contains(links[i])) continue;
-      var now = Date.now();
-      if (notInBar && now - (notInBar.get(links[i]) || 0) < 1500) continue;
-      var node = links[i].parentElement;
-      for (var depth = 0; node && depth < 20; depth++) {
+      const now = Date.now();
+      if (now - (notInBar.get(links[i]) || 0) < 1500) continue;
+      let node = links[i].parentElement;
+      for (let depth = 0; node && depth < 20; depth++) {
         if (getComputedStyle(node).position === 'fixed') {
-          var box = node.getBoundingClientRect();
+          const box = node.getBoundingClientRect();
           if (box.bottom >= window.innerHeight - 2 && box.height <= 120) {
             siteBar = node;
             return node;
           }
-          if (notInBar) notInBar.set(links[i], now); // pinned, but some other layer
+          notInBar.set(links[i], now); // fixed, but some other layer
           break;
         }
         node = node.parentElement;
@@ -377,54 +383,55 @@ export function buildLiteInjection(
     return null;
   }
 
-  // Only drawings go into the copy: shapes and their look, nothing that runs.
-  var SVG_TAGS = /^(svg|g|path|line|polyline|polygon|circle|ellipse|rect)$/;
-  var SVG_ATTRS = /^(viewBox|width|height|d|x|y|x1|x2|y1|y2|cx|cy|r|rx|ry|points|fill|fill-rule|clip-rule|stroke|stroke-width|stroke-linecap|stroke-linejoin|stroke-miterlimit|transform)$/;
+  // Copies an SVG through an allow-list of shape tags and attributes, so no
+  // scripts, event handlers or links get through.
+  const SVG_TAGS = /^(svg|g|path|line|polyline|polygon|circle|ellipse|rect)$/;
+  const SVG_ATTRS = /^(viewBox|width|height|d|x|y|x1|x2|y1|y2|cx|cy|r|rx|ry|points|fill|fill-rule|clip-rule|stroke|stroke-width|stroke-linecap|stroke-linejoin|stroke-miterlimit|transform)$/;
   function cleanSvg(node) {
-    var tag = String(node.tagName || '').toLowerCase();
+    const tag = String(node.tagName || '').toLowerCase();
     if (!SVG_TAGS.test(tag)) return '';
-    var out = '<' + tag;
-    for (var i = 0; i < node.attributes.length; i++) {
-      var attr = node.attributes[i];
+    let out = '<' + tag;
+    for (let i = 0; i < node.attributes.length; i++) {
+      const attr = node.attributes[i];
       if (SVG_ATTRS.test(attr.name) && !/[<>"&]/.test(attr.value)) {
         out += ' ' + attr.name + '="' + attr.value + '"';
       }
     }
     out += '>';
-    for (var j = 0; j < node.children.length; j++) out += cleanSvg(node.children[j]);
+    for (let j = 0; j < node.children.length; j++) out += cleanSvg(node.children[j]);
     return out + '</' + tag + '>';
   }
 
   function readBar() {
     try {
-      var data = JSON.parse(localStorage.getItem(BAR_KEY) || 'null');
+      const data = JSON.parse(localStorage.getItem(BAR_KEY) || 'null');
       return data && data.order && data.items ? data : null;
-    } catch (e) {
+    } catch {
       return null;
     }
   }
 
-  // Each button's address and drawing. The plain drawing beats the filled
-  // "you're here" one: the copy shows on pages that are none of them.
+  // Prefers each button's unselected icon: the copy shows on a page that
+  // isn't any of these sections.
   function saveBar(bar) {
-    var key = location.pathname;
+    const key = location.pathname;
     if (bar === siteBar && savedFor === key && bar.__refundSaved) return;
     bar.__refundSaved = true;
     savedFor = key;
-    var old = readBar();
-    var items = (old && old.items) || {};
-    var order = [];
-    var links = bar.querySelectorAll('a[href]');
-    for (var i = 0; i < links.length; i++) {
-      var href = links[i].getAttribute('href');
+    const old = readBar();
+    const items = (old && old.items) || {};
+    const order = [];
+    const links = bar.querySelectorAll('a[href]');
+    for (let i = 0; i < links.length; i++) {
+      const href = links[i].getAttribute('href');
       if (!SAFE_PATH.test(href) || order.indexOf(href) >= 0) continue;
       order.push(href);
-      var entry = items[href] || {};
-      var here = !!links[i].querySelector('[aria-selected="true"]');
-      var svg = links[i].querySelector('svg');
-      var img = links[i].querySelector('img');
+      const entry = items[href] || {};
+      const here = !!links[i].querySelector('[aria-selected="true"]');
+      const svg = links[i].querySelector('svg');
+      const img = links[i].querySelector('img');
       if (svg) {
-        var drawing = cleanSvg(svg);
+        const drawing = cleanSvg(svg);
         if (drawing && !here) {
           entry.svg = drawing;
           entry.plain = true;
@@ -441,31 +448,31 @@ export function buildLiteInjection(
     if (!order.length) return;
     try {
       localStorage.setItem(BAR_KEY, JSON.stringify({ order: order, items: items }));
-    } catch (e) {}
+    } catch {}
   }
 
   function showCopy() {
     if (!document.body) return;
     if (!copy || !copy.isConnected) {
-      var data = readBar();
-      if (!data) return; // never seen the site's bar yet
+      const data = readBar();
+      if (!data) return; // the site's bar hasn't been seen yet
       copy = document.createElement('nav');
       copy.id = 'refund-lite-bar';
-      for (var i = 0; i < data.order.length; i++) {
-        var href = data.order[i];
-        var item = data.items[href];
+      for (let i = 0; i < data.order.length; i++) {
+        const href = data.order[i];
+        const item = data.items[href];
         if (!item || !SAFE_PATH.test(href)) continue;
-        var slot = document.createElement('div');
-        var link = document.createElement('a');
+        const slot = document.createElement('div');
+        const link = document.createElement('a');
         link.setAttribute('href', href);
         if (item.label) link.setAttribute('aria-label', String(item.label));
         if (item.img && /^https:\\/\\//.test(item.img)) {
-          var photo = document.createElement('img');
+          const photo = document.createElement('img');
           photo.src = item.img;
           photo.alt = '';
           link.appendChild(photo);
         } else if (item.svg) {
-          link.innerHTML = item.svg; // rebuilt by cleanSvg: drawing only
+          link.innerHTML = item.svg; // built by cleanSvg: shapes only
           if (!item.plain) link.className = 'refund-outline';
         }
         slot.appendChild(link);
@@ -476,39 +483,37 @@ export function buildLiteInjection(
     }
     if (!copyShown) document.documentElement.classList.add('refund-lite-copy');
     copyShown = true;
-    var section = location.pathname.split('/')[1];
-    var copyLinks = copy.querySelectorAll('a');
-    for (var j = 0; j < copyLinks.length; j++) {
-      var a = copyLinks[j];
-      var here = section && a.getAttribute('href').split('/')[1] === section;
+    const section = location.pathname.split('/')[1];
+    const copyLinks = copy.querySelectorAll('a');
+    for (let j = 0; j < copyLinks.length; j++) {
+      const a = copyLinks[j];
+      const here = section && a.getAttribute('href').split('/')[1] === section;
       if (here !== a.classList.contains('refund-here')) a.classList.toggle('refund-here');
     }
     makeRoom();
   }
 
-  // Never throws: the password-box off switch calls this on its way off.
+  // Never throws: check() calls it while switching off.
   function hideCopy() {
     try {
       if (copy && copy.parentNode) copy.parentNode.removeChild(copy);
       copy = null;
       if (copyShown) document.documentElement.classList.remove('refund-lite-copy');
       copyShown = false;
-    } catch (e) {}
+    } catch {}
   }
 
-  // The message screen is one layer pinned to the whole screen (Oct 16). It
-  // gets a marker, and the style lifts its bottom edge above the copy.
+  // Marks the chat list's full-screen fixed layer so the CSS can end it
+  // above the copy.
   function makeRoom() {
     if (document.querySelector('[data-refund-room]')) return;
-    var node = document.elementFromPoint(
+    let node = document.elementFromPoint(
       window.innerWidth / 2,
       window.innerHeight - BAR_HEIGHT - 10
     );
-    // Up from whatever is just above the copy, past any smaller pinned part,
-    // to the first pinned layer that covers the whole screen.
-    for (var depth = 0; node && node !== document.body && depth < 40; depth++) {
+    for (let depth = 0; node && node !== document.body && depth < 40; depth++) {
       if (getComputedStyle(node).position === 'fixed') {
-        var box = node.getBoundingClientRect();
+        const box = node.getBoundingClientRect();
         if (box.top <= 0 && box.bottom >= window.innerHeight - 1) {
           node.setAttribute('data-refund-room', '');
           return;
@@ -518,23 +523,22 @@ export function buildLiteInjection(
     }
   }
 
-  // A tap on the copy moves the page the way the site's own bar does, with
-  // no reload. Started from code, the site's focus move then drew the
-  // browser's blue keyboard ring on the new page's title, so for 2 seconds
-  // whatever gets focus loses the ring (it keeps the focus, for VoiceOver).
+  // pushState plus popstate lets Instagram's router switch screens without a
+  // reload. Its focus move then shows WebKit's focus ring, since no tap
+  // started it, so the outline is hidden for 2s (focus stays, for VoiceOver).
   function onCopyClick(event) {
-    var link = event.target && event.target.closest ? event.target.closest('a') : null;
+    const link = event.target && event.target.closest ? event.target.closest('a') : null;
     if (!link) return;
     event.preventDefault();
-    var href = link.getAttribute('href');
+    const href = link.getAttribute('href');
     if (!SAFE_PATH.test(href) || href === location.pathname) return;
-    var until = Date.now() + 2000;
-    var unring = function (focus) {
+    const until = Date.now() + 2000;
+    const unring = function (focus) {
       if (Date.now() > until) {
         document.removeEventListener('focusin', unring, true);
         return;
       }
-      var el = focus.target;
+      const el = focus.target;
       if (!el || !el.style || /^(INPUT|TEXTAREA)$/.test(el.tagName) || el.isContentEditable) return;
       el.style.outline = 'none';
     };
@@ -542,7 +546,7 @@ export function buildLiteInjection(
     try {
       history.pushState({}, '', href);
       window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-    } catch (e) {
+    } catch {
       location.assign(href);
     }
   }
@@ -551,60 +555,55 @@ export function buildLiteInjection(
     if (!BAR_ANCHOR || off) return;
     try {
       if (onCopyPage()) {
-        // Just after the switch the site's own bar can still be up for a
-        // moment: the copy waits for it to go.
-        if (findSiteBar()) hideCopy();
+        // Just after navigating, the site's bar can linger for a moment.
+        if (findSiteBar() || !listShowing() || somethingOverList()) hideCopy();
         else showCopy();
         return;
       }
       hideCopy();
-      var bar = findSiteBar();
+      const bar = findSiteBar();
       if (bar) saveBar(bar);
-    } catch (e) {}
+    } catch {}
   }
 
-  // Checked a few times just after the address changes (the new screen takes
-  // a moment to be drawn), then once a second with the other checks. Not on
-  // every change the page makes: on a real account the page changes all the
-  // time (new posts, messages, typing dots), and checking each time made the
-  // whole page lag (Oct 16).
-  var checkTimers = [];
+  // Checked a few times while the new screen renders, then on the 1s tick. A
+  // document-wide MutationObserver fired constantly on busy accounts and made
+  // the page lag.
+  let checkTimers = [];
   function refreshBarCopy() {
     if (!BAR_ANCHOR) return;
-    for (var i = 0; i < checkTimers.length; i++) clearTimeout(checkTimers[i]);
+    for (let i = 0; i < checkTimers.length; i++) clearTimeout(checkTimers[i]);
     checkTimers = [0, 120, 300, 700, 1500].map(function (ms) {
       return setTimeout(checkBarCopy, ms);
     });
   }
   if (BAR_ANCHOR) {
-    // The keyboard: the visible part of the page shrinks. The copy steps
-    // aside so the typing box sits on the keyboard, like the site's own bar.
+    // Keyboard up: hide the copy so the message box sits on the keyboard.
     try {
       window.visualViewport.addEventListener('resize', function () {
-        var typing = window.visualViewport.height < window.innerHeight - 120;
+        const typing = window.visualViewport.height < window.innerHeight - 120;
         document.documentElement.classList.toggle('refund-lite-typing', typing);
       });
-    } catch (e) {}
+    } catch {}
+    // A tap can open a note without a URL change.
+    document.addEventListener('click', refreshBarCopy, true);
     refreshBarCopy();
   }
 
-  // The off switch. Removing the style is what makes it visible: the hidden
-  // buttons come back while the box is there.
+  // The off switch. Removing the style tag brings the hidden links back.
   function check() {
-    var boxShown = !!document.querySelector(PASSWORD_BOX);
-    if (boxShown === off) return;
-    off = boxShown;
+    const fieldShown = !!document.querySelector(PASSWORD_FIELD);
+    if (fieldShown === off) return;
+    off = fieldShown;
     if (off) hideCopy();
     if (style) {
       if (off && style.parentNode) style.parentNode.removeChild(style);
       if (!off) (document.head || document.documentElement).appendChild(style);
     }
-    // Back on: report where we are, in case the address changed while off.
-    if (!off) send();
+    if (!off) send(); // back on: report the URL in case it changed meanwhile
   }
-  // Every second, and at once when a box is tapped (before any typing). The
-  // edge colours are checked on the same beat: a new screen inside the site
-  // (a chat, the reel viewer) can change them without a page load.
+  // Every second, and on focus so it's off before anything is typed. A new
+  // screen can change the edge colours and bar without a page load.
   setInterval(function () {
     if (document.hidden) return;
     check();
@@ -612,8 +611,8 @@ export function buildLiteInjection(
     checkBarCopy();
   }, 1000);
   document.addEventListener('focusin', function (event) {
-    var box = event.target;
-    if (box && box.matches && box.matches(PASSWORD_BOX)) check();
+    const field = event.target;
+    if (field && field.matches && field.matches(PASSWORD_FIELD)) check();
   }, true);
 })();
 true;

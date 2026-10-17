@@ -1,6 +1,5 @@
-// The page's edge colours: the page script reports them, and Refund paints the
-// strips behind the clock and the home bar with them. The page is not trusted,
-// so only plain rgb()/rgba() numbers may get through.
+// The script reports the page's edge colours for the safe-area strips. The
+// page isn't trusted, so only plain rgb() and rgba() values get through.
 import { parseLiteColor, parseLiteMessage } from "@/utils/lite-inject";
 
 describe("parseLiteColor", () => {

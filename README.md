@@ -4,7 +4,7 @@ The code behind **Trim**, a page in the iPhone app [Refund: Screen Time](https:/
 
 Refund is not affiliated with or endorsed by Instagram or Meta.
 
-Trim was first called Reel-free, and its working name was Lite, so the files are named `lite-...`.
+Its working name was Lite, so the files are named `lite-...`.
 
 ## Why this is public
 
@@ -14,7 +14,7 @@ Refund itself is closed source. The pieces around these files (buttons, fonts, t
 
 ## What runs on Instagram's page
 
-One script: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 620 lines. Refund hands it to the page as the page starts loading. It does seven things:
+One file: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 620 lines. Refund hands its main script to the page as the page starts loading, and two short snippets from the same file only when needed (pausing videos, and the refresh in point 8). Together they do eight things:
 
 1. **Hides buttons** that lead to the parts you've switched off (Reels is on by default, Explore is optional), plus Instagram's "Open app" button and its "Use the app" bar, with a style rule. The list is in [`utils/lite-sites.ts`](utils/lite-sites.ts). Another style rule swaps the two icons at the top of your profile, so the settings gear sits top right, as in the Instagram app.
 2. **Reports address changes to Refund.** Instagram often changes its address without loading a new page, so the script tells Refund each new address. Refund then decides whether to show the page or a "switched off here" card.
@@ -22,13 +22,14 @@ One script: [`utils/lite-inject.ts`](utils/lite-inject.ts), about 620 lines. Ref
 4. **Counts reels played in messages**, for the "Reels allowed in DMs" limit. When you pass the limit it sends Refund a short message saying so. To tell reels apart it remembers each video's source address in the page's memory only. That is never sent.
 5. **Reports the page's edge colours.** Instagram leaves no room for the iPhone's clock or home bar, so Refund keeps the page between them and paints those two strips to match the page. The script sends the background colour at the page's top and bottom edge, only when it changes. Refund accepts nothing but `rgb()` numbers.
 6. **Switches itself off** on any page that has a password box, within a second or the moment you tap the box.
-7. **Shows Instagram's own bottom bar on your chat list.** Instagram's website leaves its bottom bar off the message pages. With "Bar in DMs" on (the default), the script remembers the last bar it saw on another page: each button's address (like `/explore/`), its icon drawing and label, and your profile photo's address and its label (Instagram's own text, which names your account). It keeps this in the page's own storage on your phone (`localStorage`, one entry called `refundLiteBar`), which belongs to Instagram's site, and draws a copy of the bar on the chat list. None of it is sent to Refund.
+7. **Shows Instagram's own bottom bar on your chat list.** Instagram's website leaves its bottom bar off the message pages. With "Bar in DMs" on (the default), the script remembers the last bar it saw on another page: each button's address (like `/explore/`), its icon drawing and label, and your profile photo's address and its label (Instagram's own text, which names your account). It keeps this in the page's own storage on your phone (`localStorage`, one entry called `refundLiteBar`), which belongs to Instagram's site, and draws a copy of the bar on the chat list. None of it is sent to Refund. The copy steps aside while something is open over the list, like a note's reply box: the script checks where dialogs and text boxes sit on the screen, never what is in them.
+8. **Refreshes the page when you come back.** Instagram's page stops updating while Refund is in the background, so new messages and notes wouldn't show. When you come back after 30 seconds or more, Refund reloads it, unless a text box has focus, so a half-typed message isn't lost. It checks only which element has focus, never what is typed.
 
 ## What it never does
 
 - It makes no network requests of its own. (The copy of the bottom bar shows your profile photo from the same Instagram address the real bar uses.) The only things it sends are three kinds of message to the Refund app on the same phone: the page's address, "reel limit reached", and the two edge colours. Search the file for `postMessage`: there are three.
-- It doesn't read what you type. It checks only whether a password box exists, never what is in it.
-- It doesn't read your messages, posts or cookies. The only stored data it touches is its own `refundLiteBar` entry. The only things it reads from the page are its address, whether it has a password box, the background colour at its top and bottom edge, the size, position and source address of videos, and the buttons of Instagram's bottom bar (addresses, icon drawings, labels and your photo's address).
+- It doesn't read what you type. It checks only whether a password box exists, where text boxes sit and which element has focus, never what is in them.
+- It doesn't read your messages, posts or cookies. The only stored data it touches is its own `refundLiteBar` entry. The only things it reads from the page are its address, whether it has a password box, the background colour at its top and bottom edge, the size, position and source address of videos, where dialogs and text boxes sit and which element has focus, and the buttons of Instagram's bottom bar (addresses, icon drawings, labels and your photo's address).
 
 This search should print five lines, all from the bottom bar copy: two copy an icon's drawing attributes (`attr.value`), two read and write its `refundLiteBar` entry, and one draws an icon that was cleaned to drawing only (`innerHTML`):
 
