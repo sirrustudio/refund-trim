@@ -16,6 +16,20 @@ export const LITE_CODE_URL = "https://github.com/sirrustudio/refund-trim";
 
 export type LiteSiteId = "instagram";
 
+/**
+ * A tap on a link to `from` (a path, with or without its trailing slash, and
+ * no query) goes to `to` instead, inside the page. Skipped when `to` is
+ * blocked, so the tap is blocked instead.
+ */
+export type LiteLinkRewrite = { from: string; to: string };
+
+/**
+ * On these paths, a heading with one of these labels (lower case, exact)
+ * between posts hides itself and every feed item after it. Only short text
+ * outside posts, links and buttons is read.
+ */
+export type LiteHiddenPosts = { paths: string[]; labels: string[] };
+
 /** A switch the user can flip in settings. */
 export type LiteOptionalBlock = {
   /** Saved in settings: never rename one after release. */
@@ -30,6 +44,8 @@ export type LiteOptionalBlock = {
   /** Allow-list mode: everything else on the site is blocked. */
   allowOnlyPaths?: string[];
   hideSelectors: string[];
+  linkRewrites?: LiteLinkRewrite[];
+  hidePosts?: LiteHiddenPosts;
   /** Replaces the blocked card's text while this switch is on. */
   blockedLine?: string;
   /** This switch controls the bar copy (see LiteBarCopy). */
@@ -75,6 +91,18 @@ export type LiteSite = {
   hideSelectors: string[];
   /** CSS rules that move things. Removed with the hide rules on login forms. */
   styleRules?: string[];
+  linkRewrites?: LiteLinkRewrite[];
+  hidePosts?: LiteHiddenPosts;
+  /**
+   * Matches only once the site's own interface is drawn. The app keeps its
+   * loading cover up until then, instead of showing the site's loading screens.
+   */
+  readySelector?: string;
+  /**
+   * A link only the site's own bottom bar contains. The script gives that bar
+   * the page's background, since some pages (search) draw it see-through.
+   */
+  siteBarAnchor?: string;
   barCopy?: LiteBarCopy;
   optionalBlocks?: LiteOptionalBlock[];
   /** The switch the "REELS OFF" stamp refers to; the stamp hides while it's off. */
@@ -113,6 +141,10 @@ export const LITE_SITES: LiteSite[] = [
       'header > div:has(> div > a[href^="/accounts/settings/"]) > div:has(> a[href^="/accounts/settings/"]){justify-content:flex-end !important;}',
       'header > div:has(> div > a[href^="/accounts/settings/"]) > div:last-child{justify-content:flex-start !important;}',
     ],
+    // The chat list and the bottom bar both link to messages; the loading
+    // screens before them have no links.
+    readySelector: 'a[href^="/direct/"]',
+    siteBarAnchor: 'a[href="/direct/inbox/"]',
     barCopy: {
       siteBarAnchor: 'a[href="/direct/inbox/"]',
       // Chats and message requests get the full screen, as in the app.
@@ -139,10 +171,34 @@ export const LITE_SITES: LiteSite[] = [
       {
         id: "instagram-explore",
         label: "Block Explore",
-        description: "Switch off Instagram's discovery page.",
+        description: "Switch off the Explore grid. Search still works.",
         defaultOn: false,
-        blockedPaths: ["/explore"],
-        hideSelectors: ['a[href^="/explore"]'],
+        beta: true,
+        blockedPaths: [],
+        blockedPathPatterns: [
+          // The grid, and the grids behind hashtags, places and keyword
+          // searches (mostly reels).
+          /^\/explore\/?$/,
+          /^\/explore\/(tags|locations|search\/keyword)(\/|$)/,
+        ],
+        // The search button opens the grid with a search box on top; this
+        // opens the search page instead.
+        linkRewrites: [{ from: "/explore", to: "/explore/search/" }],
+        hideSelectors: [],
+        blockedLine: "Explore is switched off here.",
+      },
+      {
+        id: "instagram-hide-suggested",
+        label: "Hide suggested posts",
+        description: "Home keeps your stories and the people you follow.",
+        defaultOn: true,
+        beta: true,
+        blockedPaths: [],
+        // Home keeps its stories; the posts after Instagram's "Suggested
+        // posts" heading go. Not "Suggested for you": that heading also sits
+        // over the people-to-follow row mid-feed. English only.
+        hidePosts: { paths: ["/"], labels: ["suggested posts"] },
+        hideSelectors: [],
       },
       {
         id: "instagram-dms-only",
@@ -202,6 +258,11 @@ export function applyLiteBlocks(
       ...site.hideSelectors,
       ...on.flatMap((b) => b.hideSelectors),
     ],
+    linkRewrites: [
+      ...(site.linkRewrites ?? []),
+      ...on.flatMap((b) => b.linkRewrites ?? []),
+    ],
+    hidePosts: on.find((b) => b.hidePosts)?.hidePosts ?? site.hidePosts,
     blockedLine:
       [...on].reverse().find((b) => b.blockedLine)?.blockedLine ??
       site.blockedLine,

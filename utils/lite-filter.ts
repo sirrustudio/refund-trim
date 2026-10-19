@@ -1,6 +1,6 @@
 // Decides what happens to a URL in Lite. No React, storage or network, so the
 // rules are easy to read and test.
-import type { LiteSite } from "@/utils/lite-sites";
+import { applyLiteBlocks, type LiteSite } from "@/utils/lite-sites";
 
 /**
  * - allow: load it in Lite
@@ -104,4 +104,23 @@ export function checkLiteUrl(site: LiteSite, url: string): LiteVerdict {
     return "block";
   }
   return "allow";
+}
+
+/**
+ * The blocked card's line for a URL, from the first switch that's on and
+ * blocks it by itself, so a hashtag grid says Explore rather than Reels.
+ * `site` is the site's own config, before applyLiteBlocks.
+ */
+export function blockedLineFor(
+  site: LiteSite,
+  enabledBlockIds: string[],
+  url: string,
+): string {
+  for (const block of site.optionalBlocks ?? []) {
+    if (!block.blockedLine || !enabledBlockIds.includes(block.id)) continue;
+    if (checkLiteUrl(applyLiteBlocks(site, [block.id]), url) === "block") {
+      return block.blockedLine;
+    }
+  }
+  return site.blockedLine;
 }

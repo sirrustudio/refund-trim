@@ -2,6 +2,7 @@ import { router, Stack, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   AppState,
   Linking,
   Share,
@@ -21,11 +22,13 @@ import { LiteSettingsSheet } from "@/components/sirru/lite/lite-settings-sheet";
 import { LiteStatusPanel } from "@/components/sirru/lite/lite-status-panel";
 import { T } from "@/constants/tokens";
 import { useIsDark } from "@/hooks/use-color-scheme";
+import { useKeyboardOverlap } from "@/hooks/use-keyboard-overlap";
 import { useLiteIntro } from "@/hooks/use-lite-intro";
 import { useLiteSettings } from "@/hooks/use-lite-settings";
 import { useSirruFonts } from "@/hooks/use-sirru-fonts";
 import { track } from "@/utils/analytics";
 import {
+  blockedLineFor,
   checkLiteUrl,
   isNoScriptUrl,
   isSignedInUrl,
@@ -34,9 +37,12 @@ import {
 } from "@/utils/lite-filter";
 import {
   buildLiteInjection,
+  buildLiteUpdate,
+  keyboardScript,
   parseLiteMessage,
   PAUSE_ALL_VIDEOS,
   RELOAD_UNLESS_TYPING,
+  RESUME_VIDEOS,
   type LiteRgb,
 } from "@/utils/lite-inject";
 import {
@@ -47,12 +53,23 @@ import {
 } from "@/utils/lite-settings";
 import { applyLiteBlocks, findLiteSite } from "@/utils/lite-sites";
 
+/**
+ * How the blocked card's button gets out:
+ * - stay: the page never left (a stopped tap), so the card just closes
+ * - back: the page moved to the address in place, so it steps back
+ * - home: anything else (a full page load, new settings): the start page loads
+ * - chat: the reel limit; reloading the chat closes the reel viewer
+ */
+type BlockedExit = "stay" | "back" | "home" | "chat";
+
 type BlockedState = {
   line: string;
   buttonLabel: string;
-  /** Reel limit hit: the button reloads the chat instead of going home. */
-  backToChat?: boolean;
+  exit: BlockedExit;
 };
+
+/** How an address reached handleAddress, which picks the card's way out. */
+type Arrival = "tap" | "load" | "move" | "recheck";
 
 /**
  * A plain import throws in builds made before react-native-webview was
@@ -76,6 +93,18 @@ const NativeWebView = loadWebView();
  */
 const REFRESH_AFTER_MS = 5 * 60_000;
 
+/**
+ * Longest the loading cover waits, once the page has loaded, for the script
+ * to say the site's interface is drawn. Login pages have no script to say so.
+ */
+const READY_WAIT_MS = 3000;
+
+/** The loading cover's fade once the page is drawn. */
+const COVER_FADE_MS = 220;
+
+/** Time for a step back to land before checking it left the blocked page. */
+const BACK_CHECK_MS = 700;
+
 /** Edge colours until the page reports its own: Instagram's light and dark backgrounds. */
 const LIGHT_PAGE: LiteRgb = { r: 255, g: 255, b: 255 };
 const DARK_PAGE: LiteRgb = { r: 12, g: 16, b: 20 };
@@ -89,6 +118,10 @@ function isDarkRgb({ r, g, b }: LiteRgb): boolean {
   return 0.299 * r + 0.587 * g + 0.114 * b < 140;
 }
 
+function loadPageScript(url: string): string {
+  return `window.location.replace(${JSON.stringify(url)}); true;`;
+}
+
 /**
  * The Lite browser: the site's own web page with the switched-off sections
  * blocked. It checks URLs on the phone and never reads messages, logins or
@@ -98,11 +131,12 @@ export default function LiteBrowserScreen() {
   const fontsLoaded = useSirruFonts();
   const isDark = useIsDark();
   const insets = useSafeAreaInsets();
+  const keyboardOverlap = useKeyboardOverlap();
   const { site: siteParam } = useLocalSearchParams<{ site?: string }>();
   const baseSite = findLiteSite(siteParam);
 
   // `settings` follows the sheet live; `applied` is what the page uses. They
-  // sync when the sheet closes, so the page reloads once, not on every tap.
+  // sync when the sheet closes, so the page updates once, not on every tap.
   const liteSettings = useLiteSettings();
   const [applied, setApplied] = useState<LiteSettings | null>(() =>
     peekLiteSettings(),
@@ -119,11 +153,16 @@ export default function LiteBrowserScreen() {
         : null,
     [baseSite, applied],
   );
+  const reelLimit = baseSite?.dmReelViewer && applied ? applied.dmReelLimit : 0;
 
   const webRef = useRef<WebView>(null);
   const blockedShownRef = useRef(false);
 
-  const [loading, setLoading] = useState(true);
+  // From opening the page until the site's own interface is drawn: the cover
+  // stays up through the site's loading screens, then fades.
+  const [opening, setOpening] = useState(true);
+  // The page itself has loaded (images aside).
+  const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   // Changing this remounts the web view ("Try again").
   const [attempt, setAttempt] = useState(0);
@@ -137,6 +176,7 @@ export default function LiteBrowserScreen() {
   const [reminderShown, setReminderShown] = useState(false);
   const [reminderRound, setReminderRound] = useState(0);
   const [blocked, setBlocked] = useState<BlockedState | null>(null);
+  const backCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // See onPageStopped.
   const lastStopAtRef = useRef(0);
   const [stopped, setStopped] = useState(false);
@@ -149,6 +189,13 @@ export default function LiteBrowserScreen() {
   } | null>(null);
   const { intro, markDone } = useLiteIntro();
   const signedInSavedRef = useRef(false);
+
+  useEffect(
+    () => () => {
+      if (backCheckRef.current) clearTimeout(backCheckRef.current);
+    },
+    [],
+  );
 
   // Gentle stop: one card after N minutes in this visit.
   const siteLook =
@@ -189,8 +236,48 @@ export default function LiteBrowserScreen() {
     return () => subscription.remove();
   }, [scriptOff, blocked, failed, stopped]);
 
+  // The loading cover comes off when the script says the page is drawn, or
+  // after READY_WAIT_MS. Login pages have no script, so they show at once.
+  useEffect(() => {
+    if (!opening || !loaded) return;
+    if (scriptOff) {
+      setOpening(false);
+      return;
+    }
+    const timer = setTimeout(() => setOpening(false), READY_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [opening, loaded, scriptOff]);
+
+  const coverOpacity = useRef(new Animated.Value(1)).current;
+  const [coverGone, setCoverGone] = useState(false);
+  useEffect(() => {
+    if (opening) {
+      coverOpacity.setValue(1);
+      setCoverGone(false);
+      return;
+    }
+    const fade = Animated.timing(coverOpacity, {
+      toValue: 0,
+      duration: COVER_FADE_MS,
+      useNativeDriver: true,
+    });
+    fade.start(({ finished }) => {
+      if (finished) setCoverGone(true);
+    });
+    return () => fade.stop();
+  }, [opening, coverOpacity]);
+
+  // While the keyboard is up the page ends at it, the way native chats work:
+  // the message box sits on the keyboard and the chat's header stays put.
+  // Left alone, iOS slides the whole page up and the header leaves the
+  // screen. The page is told too, so the bar copy steps aside.
+  const keyboardUp = keyboardOverlap > 0;
+  useEffect(() => {
+    webRef.current?.injectJavaScript(keyboardScript(keyboardUp));
+  }, [keyboardUp]);
+
   const handleAddress = useCallback(
-    (url: string): LiteVerdict => {
+    (url: string, arrival: Arrival): LiteVerdict => {
       if (!site) return "block";
       const verdict = checkLiteUrl(site, url);
 
@@ -200,19 +287,48 @@ export default function LiteBrowserScreen() {
           blockedShownRef.current = true;
           track("lite_blocked", { site: site.id });
         }
-        setBlocked({ line: site.blockedLine, buttonLabel: site.safeHomeLabel });
+        const exit: BlockedExit =
+          arrival === "tap" ? "stay" : arrival === "move" ? "back" : "home";
+        setBlocked({
+          // Names the switch that blocked it, e.g. Explore for a hashtag.
+          line:
+            baseSite && applied
+              ? blockedLineFor(baseSite, enabledBlockIds(applied), url)
+              : site.blockedLine,
+          buttonLabel: exit === "home" ? site.safeHomeLabel : "Go back",
+          exit,
+        });
         webRef.current?.injectJavaScript(PAUSE_ALL_VIDEOS);
       }
       return verdict;
     },
-    [site],
+    [site, baseSite, applied],
   );
 
-  // Layer 1: full page loads. Returning false cancels the load.
+  // New settings reach the open page without a reload (the next page load
+  // gets them from `injection`), and the current page is checked against
+  // them. Skips the first run: the page was built with those settings.
+  const pageUpdate = useMemo(
+    () => (site ? buildLiteUpdate(site, { reelLimit }) : ""),
+    [site, reelLimit],
+  );
+  const sentUpdateRef = useRef("");
+  useEffect(() => {
+    if (!pageUpdate) return;
+    const firstRun = !sentUpdateRef.current;
+    const unchanged = sentUpdateRef.current === pageUpdate;
+    sentUpdateRef.current = pageUpdate;
+    if (firstRun || unchanged) return;
+    webRef.current?.injectJavaScript(pageUpdate);
+    const url = currentUrlRef.current;
+    if (url) handleAddress(url, "recheck");
+  }, [pageUpdate, handleAddress]);
+
+  // Full page loads. Returning false cancels the load.
   function onShouldStartLoad(request: ShouldStartLoadRequest): boolean {
     // Subframes (embeds, ads) aren't navigation.
     if (request.isTopFrame === false) return true;
-    const verdict = handleAddress(request.url);
+    const verdict = handleAddress(request.url, "load");
     // Decided before the page loads, so a login page never gets the script.
     if (verdict === "allow" && site) {
       setScriptOff(isNoScriptUrl(site, request.url));
@@ -230,19 +346,7 @@ export default function LiteBrowserScreen() {
     return verdict === "allow";
   }
 
-  // Layer 2: the page changed its URL without a load (pushState).
-  function onMessage(event: WebViewMessageEvent) {
-    const message = parseLiteMessage(event.nativeEvent.data);
-    if (!message) return;
-    if (message.type === "nav") {
-      handleAddress(message.url);
-      return;
-    }
-    if (message.type === "colors") {
-      setEdgeColors({ top: message.top, bottom: message.bottom });
-      return;
-    }
-    // Reel limit hit in the DMs.
+  function showReelLimit() {
     if (!site || !applied) return;
     if (!blockedShownRef.current) {
       blockedShownRef.current = true;
@@ -253,20 +357,74 @@ export default function LiteBrowserScreen() {
     setBlocked({
       line: `That's your ${count} reel${count === 1 ? "" : "s"}.`,
       buttonLabel: "Back to the chat",
-      backToChat: true,
+      exit: "chat",
     });
   }
 
-  function goSafeHome() {
-    if (!site) return;
+  function onMessage(event: WebViewMessageEvent) {
+    const message = parseLiteMessage(event.nativeEvent.data);
+    if (!message) return;
+    switch (message.type) {
+      case "nav":
+        // The page changed its URL without a load (pushState).
+        currentUrlRef.current = message.url;
+        handleAddress(message.url, "move");
+        return;
+      case "tapBlocked":
+        // The page already stopped the tap. If this check disagrees, follow
+        // the link after all rather than leave a dead tap.
+        if (handleAddress(message.url, "tap") === "allow") {
+          webRef.current?.injectJavaScript(
+            `window.location.assign(${JSON.stringify(message.url)}); true;`,
+          );
+        }
+        return;
+      case "ready":
+        setOpening(false);
+        return;
+      case "colors":
+        setEdgeColors({ top: message.top, bottom: message.bottom });
+        return;
+      case "reelLimit":
+        showReelLimit();
+        return;
+    }
+  }
+
+  function closeBlocked() {
+    if (!site || !blocked) return;
+    const { exit } = blocked;
     setBlocked(null);
     blockedShownRef.current = false;
+    const web = webRef.current;
+    if (!web) return;
+
+    if (exit === "stay") {
+      web.injectJavaScript(RESUME_VIDEOS);
+      return;
+    }
+    if (exit === "back") {
+      web.injectJavaScript("history.back(); true;");
+      // Videos play again only once the page has left the blocked address.
+      // If it didn't leave, the start page loads instead.
+      if (backCheckRef.current) clearTimeout(backCheckRef.current);
+      backCheckRef.current = setTimeout(() => {
+        const url = currentUrlRef.current;
+        if (url && checkLiteUrl(site, url) !== "block") {
+          webRef.current?.injectJavaScript(RESUME_VIDEOS);
+          return;
+        }
+        setBlocked(null);
+        blockedShownRef.current = false;
+        webRef.current?.injectJavaScript(loadPageScript(site.startUrl));
+      }, BACK_CHECK_MS);
+      return;
+    }
     // Reloading the chat closes the reel viewer.
-    const target = blocked?.backToChat
-      ? "window.location.href"
-      : JSON.stringify(site.startUrl);
-    webRef.current?.injectJavaScript(
-      `window.location.replace(${target}); true;`,
+    web.injectJavaScript(
+      exit === "chat"
+        ? "window.location.replace(window.location.href); true;"
+        : loadPageScript(site.startUrl),
     );
   }
 
@@ -278,7 +436,8 @@ export default function LiteBrowserScreen() {
   function retry() {
     setFailed(false);
     setStopped(false);
-    setLoading(true);
+    setLoaded(false);
+    setOpening(true);
     setAttempt((count) => count + 1);
   }
 
@@ -293,7 +452,8 @@ export default function LiteBrowserScreen() {
       setStopped(true);
       return;
     }
-    setLoading(true);
+    setLoaded(false);
+    setOpening(true);
     webRef.current?.reload();
   }
 
@@ -302,12 +462,13 @@ export default function LiteBrowserScreen() {
     if (JSON.stringify(liteSettings.settings) === JSON.stringify(applied))
       return;
     setApplied(liteSettings.settings);
-    setBlocked(null);
-    blockedShownRef.current = false;
-    setFailed(false);
-    setStopped(false);
-    setLoading(true);
-    setAttempt((count) => count + 1);
+    // The page under the card may be allowed now. The check after the update
+    // puts the card back if it isn't.
+    if (blocked) {
+      setBlocked(null);
+      blockedShownRef.current = false;
+      webRef.current?.injectJavaScript(RESUME_VIDEOS);
+    }
   }
 
   function shareLink() {
@@ -316,13 +477,8 @@ export default function LiteBrowserScreen() {
   }
 
   const fullInjection = useMemo(
-    () =>
-      baseSite && site && applied
-        ? buildLiteInjection(site, {
-            reelLimit: baseSite.dmReelViewer ? applied.dmReelLimit : 0,
-          })
-        : "",
-    [baseSite, site, applied],
+    () => (site ? buildLiteInjection(site, { reelLimit }) : ""),
+    [site, reelLimit],
   );
   // Takes effect from the next page load.
   const injection = scriptOff ? undefined : fullInjection;
@@ -334,14 +490,10 @@ export default function LiteBrowserScreen() {
 
   if (!fontsLoaded || !baseSite || !site || !applied) return null;
 
-  // The app's own full-screen cover.
+  // The app's own full-screen covers, apart from the loading one.
   const coverShown =
-    !NativeWebView ||
-    loading ||
-    failed ||
-    stopped ||
-    !!blocked ||
-    reminderShown;
+    !NativeWebView || failed || stopped || !!blocked || reminderShown;
+  const loadingCoverUp = !!NativeWebView && !coverGone;
   // Instagram's page doesn't allow for the safe areas (Safari never draws a
   // page under the status bar), so it's inset and the strips are painted its
   // edge colours. Login pages have no script to report colours, and their
@@ -353,6 +505,7 @@ export default function LiteBrowserScreen() {
     !intro.menuTipDone &&
     !scriptOff &&
     !coverShown &&
+    !loadingCoverUp &&
     !settingsOpen;
   const fallback = isDark ? DARK_PAGE : LIGHT_PAGE;
   const topColor = edgeColors?.top ?? fallback;
@@ -362,13 +515,14 @@ export default function LiteBrowserScreen() {
     : {
         ...StyleSheet.absoluteFillObject,
         top: insets.top,
-        bottom: insets.bottom,
+        bottom: keyboardUp ? keyboardOverlap : insets.bottom,
       };
-  const statusStyle = coverShown
-    ? "auto"
-    : (edgeToEdge ? isDark : isDarkRgb(topColor))
-      ? "light"
-      : "dark";
+  const statusStyle =
+    coverShown || loadingCoverUp
+      ? "auto"
+      : (edgeToEdge ? isDark : isDarkRgb(topColor))
+        ? "light"
+        : "dark";
 
   return (
     <>
@@ -387,12 +541,14 @@ export default function LiteBrowserScreen() {
                 },
               ]}
             />
+            {/* With the keyboard up, this also fills the space it's sliding
+                into, in the page's own colour. */}
             <View
               style={[
                 styles.strip,
                 {
                   bottom: 0,
-                  height: insets.bottom,
+                  height: Math.max(insets.bottom, keyboardOverlap),
                   backgroundColor: toCss(bottomColor),
                 },
               ]}
@@ -438,12 +594,22 @@ export default function LiteBrowserScreen() {
             }}
             // Don't wait for every image.
             onLoadProgress={(event) => {
-              if (event.nativeEvent.progress >= 0.75) setLoading(false);
+              if (event.nativeEvent.progress >= 0.75) setLoaded(true);
             }}
-            onLoadEnd={() => setLoading(false)}
-            onError={() => setFailed(true)}
+            onLoadEnd={() => setLoaded(true)}
+            onError={() => {
+              setFailed(true);
+              setOpening(false);
+            }}
             onContentProcessDidTerminate={onPageStopped}
             allowsInlineMediaPlayback
+            // Left out, react-native-webview 13 sets the scroll view's
+            // deceleration to 0 on every drag, so a flick stops the moment
+            // the finger lifts. "normal" is Safari's own glide.
+            decelerationRate="normal"
+            // The arrows-and-tick bar above the keyboard belongs to web forms;
+            // a chat app has none. Login pages keep it to move between boxes.
+            hideKeyboardAccessoryView={!edgeToEdge}
             webviewDebuggingEnabled={__DEV__}
             // A long-press preview would load blocked links in the background.
             allowsLinkPreview={false}
@@ -455,8 +621,17 @@ export default function LiteBrowserScreen() {
           />
         ) : null}
 
-        {/* Covers and the ⋯ button. Touches elsewhere pass through to the
-            page. */}
+        {loadingCoverUp ? (
+          <Animated.View
+            pointerEvents={opening ? "auto" : "none"}
+            style={[StyleSheet.absoluteFill, { opacity: coverOpacity }]}
+          >
+            <LiteStatusPanel label={`OPENING ${site.label.toUpperCase()}`} />
+          </Animated.View>
+        ) : null}
+
+        {/* The other covers and the ⋯ button. Touches elsewhere pass through
+            to the page. */}
         <SafeAreaView
           edges={["top", "left", "right", "bottom"]}
           pointerEvents="box-none"
@@ -474,9 +649,6 @@ export default function LiteBrowserScreen() {
               />
             ) : null}
 
-            {NativeWebView && loading && !failed && !stopped ? (
-              <LiteStatusPanel label={`OPENING ${site.label.toUpperCase()}`} />
-            ) : null}
             {failed ? (
               <LiteStatusPanel
                 label="NO CONNECTION"
@@ -497,7 +669,7 @@ export default function LiteBrowserScreen() {
               <LiteBlockedCard
                 line={blocked.line}
                 buttonLabel={blocked.buttonLabel}
-                onBack={goSafeHome}
+                onBack={closeBlocked}
               />
             ) : null}
 
